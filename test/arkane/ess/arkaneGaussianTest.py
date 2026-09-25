@@ -209,6 +209,24 @@ class ArkaneGaussianLogTest:
                 found_rotor = True
         assert found_rotor
 
+
+    def test_symmetry_does_not_use_shared_scratch_directory(self, tmp_path, monkeypatch):
+        """
+        Test that the symmetry calculation does not use (and delete) a scratch directory
+        shared with other Arkane runs from the same working directory, which made
+        concurrent runs (e.g. pytest-xdist workers) fail.
+        """
+        monkeypatch.chdir(tmp_path)
+        shared_scratch = tmp_path / "scratch"
+        shared_scratch.mkdir()
+        sentinel = shared_scratch / "file_of_another_run"
+        sentinel.write_text("")
+
+        log = GaussianLog(os.path.join(self.data_path, "oxygen.log"))
+        optical, symmetry, _ = log.get_symmetry_properties()
+        assert optical == 1
+        assert symmetry == 2
+        assert sentinel.exists()
     def test_load_scan_angle(self):
         """
         Ensures proper scan angle found in Gaussian scan job
