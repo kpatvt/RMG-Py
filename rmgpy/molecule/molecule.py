@@ -74,6 +74,22 @@ globals().update({
 })
 
 
+def _copy_props(props):
+    """
+    Return a copy of an atom's `props` dictionary that is as independent as a deep copy.
+
+    The props of an atom usually only hold immutable values (e.g. ``inRing``), in which case a
+    shallow copy suffices and is much faster than ``deepcopy``, which is otherwise one of the
+    main costs of copying a molecule.
+    """
+    if props is None:
+        return None
+    for value in props.values():
+        if not (value is None or isinstance(value, (bool, int, float, str))):
+            return deepcopy(props)
+    return dict(props)
+
+
 class Atom(Vertex):
     """
     An atom. The attributes are:
@@ -357,7 +373,7 @@ class Atom(Vertex):
         a.morphology = self.morphology
         a.coords = self.coords[:]
         a.id = self.id
-        a.props = deepcopy(self.props)
+        a.props = _copy_props(self.props)
         return a
 
     def is_electron(self):

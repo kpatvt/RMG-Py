@@ -38,6 +38,8 @@ cdef dict bond_orders
 
 cdef tuple _skip_first(in_tuple)
 
+cdef dict _copy_props(dict props)
+
 cdef class Atom(Vertex):
 
     cdef public Element element

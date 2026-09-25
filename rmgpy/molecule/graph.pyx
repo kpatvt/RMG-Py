@@ -323,25 +323,53 @@ cdef class Graph(object):
         cdef int index1, index2
 
         other = Graph()
-        vertices = self.vertices
-        mapping = {}
-        for vertex in vertices:
-            if deep:
-                vertex2 = other.add_vertex(vertex.copy())
-                mapping[vertex] = vertex2
-            else:
+        if deep:
+            self._deep_copy_into(other)
+        else:
+            for vertex in self.vertices:
                 edges = vertex.edges
                 other.add_vertex(vertex)
                 vertex.edges = edges
-        if deep:
-            for vertex1 in vertices:
-                for vertex2 in vertex1.edges:
-                    edge = vertex1.edges[vertex2]
-                    edge = edge.copy()
-                    edge.vertex1 = mapping[vertex1]
-                    edge.vertex2 = mapping[vertex2]
-                    other.add_edge(edge)
         return other
+
+    cdef list _deep_copy_into(self, Graph other):
+        """
+        Add deep copies of the vertices and edges of this graph to the empty graph `other`,
+        and return the list of new vertices (in the same order as ``self.vertices``).
+
+        Each edge is copied once, and the new edges are inserted directly into the vertex
+        edge dictionaries in the same order as :meth:`add_edge` would, without its linear
+        membership checks. Vertices are looked up by ``id`` because vertices hash on their
+        element, which collides heavily.
+        """
+        cdef Vertex vertex, vertex1, vertex2, new1, new2
+        cdef Edge edge
+        cdef dict id_map = {}
+        cdef set copied = set()
+        cdef list new_vertices
+
+        for vertex in self.vertices:
+            new1 = vertex.copy()
+            new1.edges = {}
+            other.vertices.append(new1)
+            id_map[id(vertex)] = new1
+        new_vertices = other.vertices
+
+        for vertex1 in self.vertices:
+            for vertex2, edge in vertex1.edges.items():
+                if id(edge) in copied:
+                    continue
+                copied.add(id(edge))
+                new1 = id_map[id(vertex1)]
+                new2 = id_map[id(vertex2)]
+                edge = edge.copy()
+                # Orient the copy as the previous implementation did, which copied every
+                # edge from both ends and kept the copy made from the second end
+                edge.vertex1 = new2
+                edge.vertex2 = new1
+                new1.edges[new2] = edge
+                new2.edges[new1] = edge
+        return new_vertices
 
     cpdef dict copy_and_map(self):
         """
@@ -356,19 +384,10 @@ cdef class Graph(object):
         cdef int index1, index2
 
         other = Graph()
-        vertices = self.vertices
+        new_vertices = self._deep_copy_into(other)
         mapping = {}
-        for vertex in vertices:
-            vertex2 = other.add_vertex(vertex.copy())
-            mapping[vertex] = vertex2
-
-        for vertex1 in vertices:
-            for vertex2 in vertex1.edges:
-                edge = vertex1.edges[vertex2]
-                edge = edge.copy()
-                edge.vertex1 = mapping[vertex1]
-                edge.vertex2 = mapping[vertex2]
-                other.add_edge(edge)
+        for index1 in range(len(self.vertices)):
+            mapping[self.vertices[index1]] = new_vertices[index1]
         return mapping
 
     cpdef Graph merge(self, Graph other):
