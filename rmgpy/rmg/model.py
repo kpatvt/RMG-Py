@@ -911,6 +911,11 @@ class CoreEdgeReactionModel:
 
         Makes a reaction and decides where to put it: core, edge, or PDepNetwork.
         """
+        # Species compare by identity, so membership of the (possibly long) core and edge
+        # species lists is tracked with sets of ids. Within this method, species are only
+        # added to the edge, via add_species_to_edge below.
+        core_species_ids = {id(spec) for spec in self.core.species}
+        edge_species_ids = {id(spec) for spec in self.edge.species}
         for rxn in new_reactions:
             try:
                 rxn, is_new = self.make_new_reaction(rxn, generate_thermo=generate_thermo, generate_kinetics=generate_kinetics)
@@ -926,16 +931,12 @@ class CoreEdgeReactionModel:
                 all_species_in_core = True
                 # Add the reactant and product species to the edge if necessary
                 # At the same time, check if all reactants and products are in the core
-                for spec in rxn.reactants:
-                    if spec not in self.core.species:
+                for spec in itertools.chain(rxn.reactants, rxn.products):
+                    if id(spec) not in core_species_ids:
                         all_species_in_core = False
-                        if spec not in self.edge.species:
+                        if id(spec) not in edge_species_ids:
                             self.add_species_to_edge(spec, requires_rms=requires_rms)
-                for spec in rxn.products:
-                    if spec not in self.core.species:
-                        all_species_in_core = False
-                        if spec not in self.edge.species:
-                            self.add_species_to_edge(spec, requires_rms=requires_rms)
+                            edge_species_ids.add(id(spec))
 
             isomer_atoms = sum([len(spec.molecule[0].atoms) for spec in rxn.reactants])
 
@@ -1245,16 +1246,12 @@ class CoreEdgeReactionModel:
             self.edge.species.remove(spec)
 
             # Search edge for reactions that now contain only core species;
-            # these belong in the model core and will be moved there
+            # these belong in the model core and will be moved there.
+            # Species compare by identity, so core membership is checked with a set of ids.
+            core_species_ids = {id(s) for s in self.core.species}
             for rxn in self.edge.reactions:
-                all_core = True
-                for reactant in rxn.reactants:
-                    if reactant not in self.core.species:
-                        all_core = False
-                for product in rxn.products:
-                    if product not in self.core.species:
-                        all_core = False
-                if all_core:
+                if (all(id(reactant) in core_species_ids for reactant in rxn.reactants)
+                        and all(id(product) in core_species_ids for product in rxn.products)):
                     rxn_list.append(rxn)
 
             # Move any identified reactions to the core
