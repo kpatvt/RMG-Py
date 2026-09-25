@@ -89,6 +89,27 @@ class SpeciesConstraintException(ForbiddenStructureException):
         return ("Species constraints forbids product species {0}. Please reformulate constraints, "
                 "or explicitly allow it. Reason: {1}".format(self.struct, self.reason))
 
+def _get_training_thermo_data(thermo_database, species, metal_to_scale_to=None):
+    """
+    Return ``thermo_database.get_thermo_data(species, training_set=True, metal_to_scale_to=...)``.
+
+    The same species appear in many training reactions across the kinetics families, and
+    estimating their thermo is a large part of loading the database. The results are therefore
+    cached on the thermo database, keyed by formula, and reused for isomorphic species. A copy
+    is returned so that no two species share a thermo object.
+    """
+    cache = getattr(thermo_database, '_training_thermo_cache', None)
+    if cache is None:
+        cache = thermo_database._training_thermo_cache = {}
+    bucket = cache.setdefault((species.fingerprint, metal_to_scale_to), [])
+    for cached_species, thermo in bucket:
+        if cached_species.is_isomorphic(species, strict=True):
+            return deepcopy(thermo)
+    thermo = thermo_database.get_thermo_data(species, training_set=True, metal_to_scale_to=metal_to_scale_to)
+    bucket.append((species, deepcopy(thermo)))
+    return thermo
+
+
 def _reaction_formula_key(reaction):
     """
     Return a direction-independent key built from the fingerprints (formulas) of the reactants
@@ -1257,12 +1278,12 @@ class KineticsFamily(Database):
                     reactant_copy = reactant.copy(deep=True)
                     reactant_copy.molecule[0].clear_labeled_atoms()
                     reactant_copy.generate_resonance_structures()
-                    reactant.thermo = thermo_database.get_thermo_data(reactant_copy, training_set=True)
+                    reactant.thermo = _get_training_thermo_data(thermo_database, reactant_copy)
                 for product in entry.item.products:
                     product_copy = product.copy(deep=True)
                     product_copy.molecule[0].clear_labeled_atoms()
                     product_copy.generate_resonance_structures()
-                    product.thermo = thermo_database.get_thermo_data(product_copy, training_set=True)
+                    product.thermo = _get_training_thermo_data(thermo_database, product_copy)
                 V = data.V0.value_si
                 dGrxn = entry.item._get_free_energy_of_charge_transfer_reaction(298,V)
                 data = data.to_surface_charge_transfer_bep(dGrxn,0.0)
@@ -1323,11 +1344,11 @@ class KineticsFamily(Database):
                 # Clear atom labels to avoid effects on thermo generation, ok because this is a deepcopy
                 reactant.molecule[0].clear_labeled_atoms()
                 reactant.generate_resonance_structures()
-                reactant.thermo = thermo_database.get_thermo_data(reactant, training_set=True, metal_to_scale_to=metal)
+                reactant.thermo = _get_training_thermo_data(thermo_database, reactant, metal_to_scale_to=metal)
             for product in item.products:
                 product.molecule[0].clear_labeled_atoms()
                 product.generate_resonance_structures()
-                product.thermo = thermo_database.get_thermo_data(product, training_set=True, metal_to_scale_to=metal)
+                product.thermo = _get_training_thermo_data(thermo_database, product, metal_to_scale_to=metal)
             # Now that we have the thermo, we can get the reverse k(T)
             item.kinetics = data
             data = item.generate_reverse_rate_coefficient()
