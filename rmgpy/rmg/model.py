@@ -1549,22 +1549,25 @@ class CoreEdgeReactionModel:
                 # Recompute the isomers, reactants, and products for this network
                 network.update_configurations(self)
 
-        # Remove from the global list of reactions
-        # also remove it from the global list of reactions
+        # Remove its reactions from the global list of reactions, and remove the short-lists (and
+        # reactant entries) that are left empty, so that they do not accumulate. The keys are species
+        # labels, which are not necessarily unique, so entries are only removed once they are empty
+        # (retrieve() returns an empty list for missing entries, so lookups are unaffected).
         for family in self.reaction_dict:
-            if spec in self.reaction_dict[family]:
-                del self.reaction_dict[family][spec]
-            for reactant1 in self.reaction_dict[family]:
-                if spec in self.reaction_dict[family][reactant1]:
-                    del self.reaction_dict[family][reactant1][spec]
-            for reactant1 in self.reaction_dict[family]:
-                for reactant2 in self.reaction_dict[family][reactant1]:
+            family_dict = self.reaction_dict[family]
+            for reactant1 in list(family_dict):
+                reactant1_dict = family_dict[reactant1]
+                for reactant2 in list(reactant1_dict):
                     temp_rxn_delete_list = []
-                    for templateReaction in self.reaction_dict[family][reactant1][reactant2]:
+                    for templateReaction in reactant1_dict[reactant2]:
                         if spec in templateReaction.reactants or spec in templateReaction.products:
                             temp_rxn_delete_list.append(templateReaction)
                     for tempRxnToBeDeleted in temp_rxn_delete_list:
-                        self.reaction_dict[family][reactant1][reactant2].remove(tempRxnToBeDeleted)
+                        reactant1_dict[reactant2].remove(tempRxnToBeDeleted)
+                    if temp_rxn_delete_list and not reactant1_dict[reactant2]:
+                        del reactant1_dict[reactant2]
+                if not reactant1_dict:
+                    del family_dict[reactant1]
 
         # remove from the global list of species, to free memory
         formula = spec.molecule[0].get_formula()

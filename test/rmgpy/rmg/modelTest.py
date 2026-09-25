@@ -477,6 +477,42 @@ class TestCoreEdgeReactionModel:
 
         assert counter == 3
 
+    def test_remove_species_from_edge_cleans_reaction_dict(self):
+        """
+        Test that removing a species from the edge removes its reactions from the reaction
+        dictionary, and removes the entries that are left empty.
+        """
+        spcA = Species().from_smiles("[OH]")
+        spcs = [Species().from_smiles("CC"), Species().from_smiles("[CH3]")]
+        spc_tuples = [((spcA, spc), ["H_Abstraction"]) for spc in spcs]
+        rxns = list(itertools.chain.from_iterable(react(spc_tuples, 1)))
+
+        cerm = CoreEdgeReactionModel()
+        new_rxns = []
+        for rxn in rxns:
+            new_rxn, is_new = cerm.make_new_reaction(rxn, generate_thermo=False, generate_kinetics=False)
+            if is_new:
+                new_rxns.append(new_rxn)
+        for rxn in new_rxns:
+            for spc in rxn.reactants + rxn.products:
+                if spc not in cerm.edge.species:
+                    cerm.add_species_to_edge(spc)
+            cerm.edge.reactions.append(rxn)
+
+        # Remove the ethyl radical, which only takes part in OH + CC = H2O + C[CH2]
+        ethyl = [spc for spc in cerm.edge.species if spc.is_isomorphic(Species().from_smiles("C[CH2]"))][0]
+        cerm.remove_species_from_edge([], ethyl)
+
+        remaining = []
+        for family_dict in cerm.reaction_dict.values():
+            for reactant1_dict in family_dict.values():
+                assert reactant1_dict  # no empty entries are left behind
+                for rxn_list in reactant1_dict.values():
+                    assert rxn_list
+                    remaining.extend(rxn_list)
+        assert len(remaining) == 2
+        assert all(ethyl not in rxn.reactants and ethyl not in rxn.products for rxn in remaining)
+
     def test_thermo_filter_species(self):
         """
         test that thermo_filter_species leaves species alone if if toleranceThermoKeepInEdge
