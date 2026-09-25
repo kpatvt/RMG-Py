@@ -920,6 +920,68 @@ cdef class Graph(object):
                 longest_cycle = cycle
         return longest_cycle
 
+    cdef bint _is_simple_mapping(self, Graph other, dict mapping):
+        """
+        Return ``True`` if `mapping` is one-to-one and only contains vertices of `self` (keys) and
+        `other` (values), in which case :meth:`_are_mapped_edges_valid` can be used.
+        """
+        cdef set ids1, ids2, mapped_ids2
+        cdef Vertex vertex1, vertex2
+        ids1 = {id(vertex1) for vertex1 in self.vertices}
+        ids2 = {id(vertex2) for vertex2 in other.vertices}
+        mapped_ids2 = set()
+        for vertex1, vertex2 in mapping.items():
+            if id(vertex1) not in ids1 or id(vertex2) not in ids2 or id(vertex2) in mapped_ids2:
+                return False
+            mapped_ids2.add(id(vertex2))
+        return True
+
+    cdef bint _are_mapped_edges_valid(self, Graph other, dict mapping, bint equivalent, bint strict) except -2:
+        """
+        Check the edges between the mapped vertices for :meth:`is_mapping_valid`, for a one-to-one
+        mapping between vertices of the two graphs. Instead of testing every pair of mapped vertices
+        for an edge (quadratic in the number of vertices, with a linear membership test for each), this
+        only visits the edges of the mapped vertices, which gives the same result.
+        """
+        cdef dict inverse
+        cdef Vertex vertex1, vertex2, neighbor1, neighbor2
+        cdef Edge edge1, edge2
+
+        inverse = {}
+        for vertex1, vertex2 in mapping.items():
+            inverse[id(vertex2)] = vertex1
+
+        # Edges of self between mapped vertices must be present (and equivalent) in other,
+        # except that self may have extra edges when checking specific cases (subgraphs)
+        for vertex1, vertex2 in mapping.items():
+            for neighbor1, edge1 in vertex1.edges.items():
+                neighbor2 = mapping.get(neighbor1)
+                if neighbor2 is None:
+                    continue
+                edge2 = vertex2.edges.get(neighbor2)
+                if edge2 is None:
+                    if equivalent:
+                        return False
+                    continue
+                if strict:
+                    if equivalent:
+                        if not edge1.equivalent(edge2):
+                            return False
+                    else:
+                        if not edge1.is_specific_case_of(edge2):
+                            return False
+
+        # Edges of other between mapped vertices must be present in self
+        for vertex1, vertex2 in mapping.items():
+            for neighbor2 in vertex2.edges:
+                neighbor1 = inverse.get(id(neighbor2))
+                if neighbor1 is None:
+                    continue
+                if neighbor1 not in vertex1.edges:
+                    return False
+
+        return True
+
     cpdef bint is_mapping_valid(self, Graph other, dict mapping, bint equivalent=True, bint strict=True) except -2:
         """
         Check that a proposed `mapping` of vertices from `self` to `other`
@@ -944,6 +1006,8 @@ cdef class Graph(object):
                     return False
 
         # Check that any edges connected mapped vertices are equivalent
+        if self._is_simple_mapping(other, mapping):
+            return self._are_mapped_edges_valid(other, mapping, equivalent, strict)
         vertices1 = list(mapping.keys())
         vertices2 = list(mapping.values())
         for i in range(len(vertices1)):

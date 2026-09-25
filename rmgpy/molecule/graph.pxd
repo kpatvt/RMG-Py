@@ -144,6 +144,10 @@ cdef class Graph(object):
     
     cpdef list get_largest_ring(self, Vertex vertex)
     
+    cdef bint _is_simple_mapping(self, Graph other, dict mapping)
+
+    cdef bint _are_mapped_edges_valid(self, Graph other, dict mapping, bint equivalent, bint strict) except -2
+
     cpdef bint is_mapping_valid(self, Graph other, dict mapping, bint equivalent=?, bint strict=?) except -2
 
     cpdef list get_edges_in_cycle(self, list vertices, bint sort=?)
