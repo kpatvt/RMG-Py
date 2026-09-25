@@ -775,7 +775,7 @@ def from_adjacency_list(adjlist, group=False, saturate_h=False, check_consistenc
             atom = GroupAtom(atom_type, unpaired_electrons, partial_charges, label, lone_pairs, sites, morphologies, props)
         else:
             # detect if this is cutting label or atom
-            _ , cutting_label_list = Fragment().detect_cutting_label(atom_type[0])
+            _ , cutting_label_list = Fragment.detect_cutting_label(atom_type[0])
             if cutting_label_list == []:
                 if sites == []:
                     site = ''
