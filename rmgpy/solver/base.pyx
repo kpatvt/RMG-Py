@@ -296,11 +296,16 @@ cdef class ReactionSystem(DASx):
 
         self.prunable_species_indices = np.array(temp)
 
+        # Same for the networks. This also avoids list.index() raising a ValueError for networks that
+        # are no longer present, whose error message would contain the (expensive) repr of the network
+        network_index = {}
+        for i, spc in enumerate(pdep_networks):
+            network_index.setdefault(id(spc), i)
         temp = []
         for i, spc in enumerate(self.prunable_networks):
-            try:
-                temp.append(pdep_networks.index(spc))
-            except:
+            if id(spc) in network_index:
+                temp.append(network_index[id(spc)])
+            else:
                 self.max_network_leak_rate_ratios[i] = np.inf  #avoid pruning of lost networks
 
         self.prunable_network_indices = np.array(temp)
