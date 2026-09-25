@@ -1807,6 +1807,22 @@ class KineticsFamily(Database):
 
         return reaction
 
+    def _get_split_template_reactants(self, group, forward):
+        """
+        Return the unconnected parts of the template reactant `group` as separate groups.
+        The result is cached for the family and direction, since splitting the group
+        (which creates new groups) is expensive compared to reacting small molecules.
+        The cache is used while `group` is the same object with the same atoms.
+        """
+        cache = self.__dict__.setdefault('_split_template_reactants', {})
+        atom_ids = [id(atom) for atom in group.vertices]
+        cached = cache.get(forward)
+        if cached is not None and cached[0] is group and cached[1] == atom_ids:
+            return list(cached[2])
+        groups = group.split()
+        cache[forward] = (group, atom_ids, groups)
+        return list(groups)
+
     def _match_reactant_to_template(self, reactant, template_reactant):
         """
         Return a complete list of the mappings if the provided reactant
@@ -2082,10 +2098,7 @@ class KineticsFamily(Database):
                     return []
             # if the family has one template and is bimolecular split template into multiple reactants
             try:
-                grps = template.reactants[0].item.split()
-                template_reactants = []
-                for grp in grps:
-                    template_reactants.append(grp)
+                template_reactants = self._get_split_template_reactants(template.reactants[0].item, forward)
             except AttributeError:
                 template_reactants = [x.item for x in template.reactants]
         else:
