@@ -287,14 +287,17 @@ cdef class ReactionSystem(DASx):
         edge_species_index = {}
         for i, spc in enumerate(edge_species):
             edge_species_index.setdefault(id(spc), i)
+        # prunable_species_indices[i] is the position in the edge of prunable_species[i], or -1 if it is
+        # no longer in the edge, so that the maximum rate ratios stay aligned with prunable_species
         temp = []
         for i, spc in enumerate(self.prunable_species):
             if id(spc) in edge_species_index:
                 temp.append(edge_species_index[id(spc)])
             else:
+                temp.append(-1)
                 self.max_edge_species_rate_ratios[i] = np.inf  #avoid pruning of species that have been moved to core
 
-        self.prunable_species_indices = np.array(temp)
+        self.prunable_species_indices = np.array(temp, dtype=int)
 
         # Same for the networks. This also avoids list.index() raising a ValueError for networks that
         # are no longer present, whose error message would contain the (expensive) repr of the network
@@ -306,9 +309,10 @@ cdef class ReactionSystem(DASx):
             if id(spc) in network_index:
                 temp.append(network_index[id(spc)])
             else:
+                temp.append(-1)
                 self.max_network_leak_rate_ratios[i] = np.inf  #avoid pruning of lost networks
 
-        self.prunable_network_indices = np.array(temp)
+        self.prunable_network_indices = np.array(temp, dtype=int)
 
     @cython.boundscheck(False)
     cpdef initialize_surface(self, list core_species, list core_reactions, list surface_species, list surface_reactions):
@@ -851,11 +855,12 @@ cdef class ReactionSystem(DASx):
             core_species_concentrations = self.core_species_concentrations
 
             # Update the maximum species rate and maximum network leak rate arrays
+            # (the index is -1 for prunable species and networks that are no longer in the edge)
             for i, index in enumerate(prunable_species_indices):
-                if max_edge_species_rate_ratios[i] < edge_species_rate_ratios[index]:
+                if index >= 0 and max_edge_species_rate_ratios[i] < edge_species_rate_ratios[index]:
                     max_edge_species_rate_ratios[i] = edge_species_rate_ratios[index]
             for i, index in enumerate(prunable_network_indices):
-                if max_network_leak_rate_ratios[i] < network_leak_rate_ratios[index]:
+                if index >= 0 and max_network_leak_rate_ratios[i] < network_leak_rate_ratios[index]:
                     max_network_leak_rate_ratios[i] = network_leak_rate_ratios[index]
 
             if char_rate == 0 and len(edge_species_rates) > 0:  # this deals with the case when there is no flux in the system
