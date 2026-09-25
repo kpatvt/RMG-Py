@@ -72,6 +72,27 @@ from rmgpy.data.solvation import SoluteData, add_solute_data, SoluteTSData, to_s
 ################################################################################
 
 
+class SpeciesConstraintException(ForbiddenStructureException):
+    """
+    A :class:`ForbiddenStructureException` raised when a product fails the species constraints.
+
+    These are raised (and silently caught) very often during reaction generation, so the
+    message, which requires converting the structure to SMILES, is only built when needed.
+    """
+
+    def __init__(self, struct, reason):
+        super().__init__(struct, reason)  # keep args so the exception can be pickled
+        self.struct = struct
+        self.reason = reason
+
+    def __str__(self):
+        return ("Species constraints forbids product species {0}. Please reformulate constraints, "
+                "or explicitly allow it. Reason: {1}".format(self.struct, self.reason))
+
+
+################################################################################
+
+
 class TemplateReaction(Reaction):
     """
     A Reaction object generated from a reaction family template. In addition
@@ -1656,11 +1677,7 @@ class KineticsFamily(Database):
             if self.is_molecule_forbidden(struct):
                 raise ForbiddenStructureException()
             if (reason := fails_species_constraints(struct)):
-                raise ForbiddenStructureException(
-                    "Species constraints forbids product species {0}. Please "
-                    "reformulate constraints, or explicitly "
-                    "allow it. Reason: {1}".format(struct, reason)
-                )
+                raise SpeciesConstraintException(struct, reason)
 
         return product_structures
 
