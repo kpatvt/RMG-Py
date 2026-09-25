@@ -137,6 +137,7 @@ cdef class ReactionSystem(DASx):
         self.edge_reaction_rates = None
 
         self.network_leak_rates = None
+        self.edge_rate_concentrations = None
 
         #surface indices
         self.surface_species_indices = None
@@ -252,6 +253,7 @@ cdef class ReactionSystem(DASx):
         self.core_species_rates = np.zeros((self.num_core_species), float)
         self.edge_species_rates = np.zeros((self.num_edge_species), float)
         self.network_leak_rates = np.zeros((self.num_pdep_networks), float)
+        self.edge_rate_concentrations = None
         self.max_network_leak_rate_ratios = np.zeros((len(self.prunable_networks)), float)
         self.sensitivity_coefficients = np.zeros((self.num_core_species, self.num_core_reactions), float)
         self.unimolecular_threshold = np.zeros((self.num_core_species), bool)
@@ -783,6 +785,7 @@ cdef class ReactionSystem(DASx):
                         logging.error("Core species names: {!r}".format([get_species_identifier(s) for s in core_species]))
                         logging.error("Core species moles: {!r}".format(self.y[:num_core_species]))
                         logging.error("Volume: {!r}".format(self.V))
+                        self.update_edge_rates()
                         logging.error("Core species net rates: {!r}".format(self.core_species_rates))
                         logging.error("Edge species net rates: {!r}".format(self.edge_species_rates))
                         logging.error("Network leak rates: {!r}".format(self.network_leak_rates))
@@ -813,6 +816,9 @@ cdef class ReactionSystem(DASx):
             snapshot = [self.t, self.V]
             snapshot.extend(y_core_species)
             self.snapshots.append(snapshot)
+
+            # Calculate the edge rates for the state of the last residual evaluation
+            self.update_edge_rates()
 
             # Get the characteristic flux
             char_rate = sqrt(np.sum(self.core_species_rates * self.core_species_rates))
@@ -1293,6 +1299,84 @@ cdef class ReactionSystem(DASx):
         # Return the invalid object (if the simulation was invalid) or None
         # (if the simulation was valid)
         return terminated, False, invalid_objects, surface_species, surface_reactions, self.t, conversion
+
+    cpdef update_edge_rates(self):
+        """
+        Calculate the edge reaction rates and edge species rates for the core species concentrations
+        of the last residual evaluation, if the residual function deferred this calculation.
+
+        The edge rates are only needed after each solver step, but the residual function is
+        evaluated many times per step, and there are usually many more edge reactions than core
+        reactions. Reactors whose residual function stores its concentrations in
+        `edge_rate_concentrations` (instead of calculating the edge rates itself) therefore rely on
+        this method, which gives the same result as calculating the edge rates in the last residual
+        evaluation. It does nothing if there is nothing to calculate.
+        """
+        cdef np.ndarray[np.int_t, ndim=2] ir, ip
+        cdef np.ndarray[np.float64_t, ndim=1] kf, kr, C, edge_species_rates, edge_reaction_rates
+        cdef Py_ssize_t j, first, second, third, num_core_species, num_core_reactions
+        cdef double k, f_reaction_rate, rev_reaction_rate, reaction_rate
+
+        if self.edge_rate_concentrations is None:
+            return
+        C = self.edge_rate_concentrations
+        self.edge_rate_concentrations = None
+
+        ir = self.reactant_indices
+        ip = self.product_indices
+        kf = self.kf
+        kr = self.kb
+        num_core_species = len(self.core_species_rates)
+        num_core_reactions = len(self.core_reaction_rates)
+        edge_species_rates = np.zeros_like(self.edge_species_rates)
+        edge_reaction_rates = np.zeros_like(self.edge_reaction_rates)
+
+        for j in range(num_core_reactions, ir.shape[0]):
+            k = kf[j]
+            if ir[j, 0] >= num_core_species or ir[j, 1] >= num_core_species or ir[j, 2] >= num_core_species:
+                f_reaction_rate = 0.0
+            elif ir[j, 1] == -1:  # only one reactant
+                f_reaction_rate = k * C[ir[j, 0]]
+            elif ir[j, 2] == -1:  # only two reactants
+                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]]
+            else:  # three reactants
+                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]] * C[ir[j, 2]]
+            k = kr[j]
+            if ip[j, 0] >= num_core_species or ip[j, 1] >= num_core_species or ip[j, 2] >= num_core_species:
+                rev_reaction_rate = 0.0
+            elif ip[j, 1] == -1:  # only one reactant
+                rev_reaction_rate = k * C[ip[j, 0]]
+            elif ip[j, 2] == -1:  # only two reactants
+                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]]
+            else:  # three reactants
+                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]] * C[ip[j, 2]]
+
+            reaction_rate = f_reaction_rate - rev_reaction_rate
+            edge_reaction_rates[j - num_core_reactions] = reaction_rate
+
+            # Add/substract the total reaction rate from each species rate
+            # Since it's an edge reaction its reactants and products could
+            # be either core or edge species
+            # We're only interested in the edge species
+            first = ir[j, 0]
+            if first >= num_core_species: edge_species_rates[first - num_core_species] -= reaction_rate
+            second = ir[j, 1]
+            if second != -1:
+                if second >= num_core_species: edge_species_rates[second - num_core_species] -= reaction_rate
+                third = ir[j, 2]
+                if third != -1:
+                    if third >= num_core_species: edge_species_rates[third - num_core_species] -= reaction_rate
+            first = ip[j, 0]
+            if first >= num_core_species: edge_species_rates[first - num_core_species] += reaction_rate
+            second = ip[j, 1]
+            if second != -1:
+                if second >= num_core_species: edge_species_rates[second - num_core_species] += reaction_rate
+                third = ip[j, 2]
+                if third != -1:
+                    if third >= num_core_species: edge_species_rates[third - num_core_species] += reaction_rate
+
+        self.edge_species_rates = edge_species_rates
+        self.edge_reaction_rates = edge_reaction_rates
 
     cpdef log_rates(self, double char_rate, object species, double species_rate, double max_dif_ln_accum_num, object network,
                     double network_rate):
