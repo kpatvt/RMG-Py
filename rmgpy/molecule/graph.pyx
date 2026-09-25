@@ -375,6 +375,39 @@ cdef class Graph(object):
                 new2.edges[new1] = edge
         return new_vertices
 
+    cdef list _topology_copy_into(self, Graph other):
+        """
+        Add plain :class:`Vertex` and :class:`Edge` objects with the same connectivity as this graph
+        to the empty graph `other`, and return the list of new vertices (in the same order as
+        ``self.vertices``). The edges are inserted in the same order as :meth:`_deep_copy_into`
+        inserts them, so graph traversals visit the vertices in the same order as in a deep copy.
+        This is much cheaper than a deep copy for algorithms that only need the connectivity.
+        """
+        cdef Vertex vertex, vertex1, vertex2, new1, new2
+        cdef Edge edge
+        cdef dict index_map = {}
+        cdef list new_vertices
+        cdef Py_ssize_t index1, index2
+
+        new_vertices = other.vertices
+        for index1 in range(len(self.vertices)):
+            vertex = self.vertices[index1]
+            new_vertices.append(Vertex())
+            index_map[id(vertex)] = index1
+
+        for index1 in range(len(self.vertices)):
+            vertex1 = self.vertices[index1]
+            new1 = new_vertices[index1]
+            for vertex2 in vertex1.edges:
+                index2 = index_map[id(vertex2)]
+                if index2 < index1:
+                    continue
+                new2 = new_vertices[index2]
+                edge = Edge(new2, new1)
+                new1.edges[new2] = edge
+                new2.edges[new1] = edge
+        return new_vertices
+
     cpdef dict copy_and_map(self):
         """
         Create a deep copy of the current graph, and return the dict
@@ -728,10 +761,12 @@ cdef class Graph(object):
         cdef bint done, found, lone_carbon
         cdef list cycle_list, cycles, cycle, graphs, neighbors, vertices_to_remove, vertices, cycle_set_list
         cdef Vertex vertex, root_vertex
-        cdef set set1, set2
+        cdef set set1, set2, cyclic_ids
 
-        # Make a copy of the graph so we don't modify the original
-        graph = self.copy(deep=True)
+        # Make a copy of the graph so we don't modify the original. Only the connectivity is needed,
+        # so a copy of the topology is used instead of a (much more expensive) deep copy.
+        graph = Graph()
+        self._topology_copy_into(graph)
         vertices = graph.vertices[:]
 
         # Step 1: Remove all terminal vertices
@@ -746,10 +781,10 @@ cdef class Graph(object):
                 graph.remove_vertex(vertex)
 
         # Step 2: Remove all other vertices that are not part of cycles
+        cyclic_ids = {id(vertex) for vertex in graph.get_all_cyclic_vertices()}
         vertices_to_remove = []
         for vertex in graph.vertices:
-            found = graph.is_vertex_in_cycle(vertex)
-            if not found:
+            if id(vertex) not in cyclic_ids:
                 vertices_to_remove.append(vertex)
         # Remove identified vertices from graph
         for vertex in vertices_to_remove:

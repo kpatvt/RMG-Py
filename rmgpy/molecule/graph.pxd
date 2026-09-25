@@ -100,6 +100,8 @@ cdef class Graph(object):
 
     cdef list _deep_copy_into(self, Graph other)
 
+    cdef list _topology_copy_into(self, Graph other)
+
     cpdef dict copy_and_map(self)
 
     cpdef Graph merge(self, Graph other)
