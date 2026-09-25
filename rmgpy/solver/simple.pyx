@@ -365,7 +365,7 @@ cdef class SimpleReactor(ReactionSystem):
         cdef np.ndarray[np.float64_t, ndim=1] core_species_concentrations, core_species_rates, core_reaction_rates
         cdef np.ndarray[np.float64_t, ndim=1] edge_species_rates, edge_reaction_rates, network_leak_rates
         cdef np.ndarray[np.float64_t, ndim=1] core_species_consumption_rates, core_species_production_rates
-        cdef np.ndarray[np.float64_t, ndim=1] C, y_core_species
+        cdef np.ndarray[np.float64_t, ndim=1] C, y_core_species, effective_pressures
         cdef np.ndarray[np.float64_t, ndim=2] jacobian, dgdk, collider_efficiencies
         cdef np.ndarray[np.int_t, ndim=1] pdep_collider_reaction_indices, pdep_specific_collider_reaction_indices
         cdef list pdep_collider_kinetics, pdep_specific_collider_kinetics
@@ -391,11 +391,12 @@ cdef class SimpleReactor(ReactionSystem):
             pdep_collider_reaction_indices = self.pdep_collision_reaction_indices
             pdep_collider_kinetics = self.pdep_collider_kinetics
             collider_efficiencies = self.collider_efficiencies
+            # Calculate the effective pressures of all these reactions at once, which avoids two
+            # numpy calls per reaction in every residual evaluation
+            effective_pressures = P * np.sum(collider_efficiencies * y_core_species / np.sum(y_core_species), axis=1)
             for i in range(pdep_collider_reaction_indices.shape[0]):
-                # Calculate effective pressure
-                Peff = P * np.sum(collider_efficiencies[i] * y_core_species / np.sum(y_core_species))
                 j = pdep_collider_reaction_indices[i]
-                kf[j] = pdep_collider_kinetics[i].get_rate_coefficient(T, Peff)
+                kf[j] = pdep_collider_kinetics[i].get_rate_coefficient(T, effective_pressures[i])
                 kr[j] = kf[j] / equilibrium_constants[j]
         if self.pdep_specific_collider_reaction_indices.shape[0] != 0:
             T = self.T.value_si
