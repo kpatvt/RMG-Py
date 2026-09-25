@@ -44,6 +44,7 @@ class DiffusionLimited(object):
     def __init__(self):
         # default is false, enabled if there is a solvent
         self.enabled = False
+        self._solute_data_cache = {}
 
     def enable(self, solvent_data, solvation_database, comment=''):
         # diffusion_limiter is enabled if a solvent has been added to the RMG object.
@@ -51,12 +52,30 @@ class DiffusionLimited(object):
         diffusion_limiter.enabled = True
         diffusion_limiter.database = solvation_database
         diffusion_limiter.solvent_data = solvent_data
+        diffusion_limiter._solute_data_cache = {}
 
     def disable(self):
         "Turn it off. Mostly useful for unit testing teardown"
         diffusion_limiter.enabled = False
         del diffusion_limiter.database
         del diffusion_limiter.solvent_data
+        diffusion_limiter._solute_data_cache = {}
+
+    def _get_solute_data(self, species):
+        """
+        Return the solute data of `species` from the solvation database.
+
+        The diffusion limit of every bimolecular edge reaction is recalculated each time a
+        reactor model is initialized, so the solute data (which only depends on the species'
+        structure) is cached per species. The cache holds a reference to the species itself,
+        so that its ``id`` cannot be reused by another object while it is cached.
+        """
+        cached = self._solute_data_cache.get(id(species))
+        if cached is not None and cached[0] is species:
+            return cached[1]
+        solute_data = self.database.get_solute_data(species)
+        self._solute_data_cache[id(species)] = (species, solute_data)
+        return solute_data
 
     def get_solvent_viscosity(self, T):
         return self.solvent_data.get_solvent_viscosity(T)
@@ -137,7 +156,11 @@ class DiffusionLimited(object):
                 spec_for_solv = spec
 
             # --- ② look-up solvation / diffusivity -------------------------
-            solute_data = self.database.get_solute_data(spec_for_solv)
+            if spec_for_solv is spec:
+                solute_data = self._get_solute_data(spec_for_solv)
+            else:
+                # Temporary species built from a fragment are not cached
+                solute_data = self.database.get_solute_data(spec_for_solv)
             # calculate radius with the McGowan volume and assuming sphere
             radius = ((75 * solute_data.V / constants.pi / constants.Na) ** (1. / 3)) / 100  # m
             diff = solute_data.get_stokes_diffusivity(T, self.get_solvent_viscosity(T))
