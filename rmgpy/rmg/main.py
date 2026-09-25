@@ -629,6 +629,13 @@ class RMG(util.Subject):
         # Load databases
         self.load_database()
 
+        # The database holds millions of long-lived objects that stay in memory for the whole run.
+        # Move them into the permanent generation so that the cyclic garbage collector does not
+        # traverse them again during every full collection, which otherwise costs a large fraction
+        # of the run time during model generation.
+        gc.collect()
+        gc.freeze()
+
         for reaction_system in self.reaction_systems:
             if isinstance(reaction_system, RMSReactor):
                 reaction_system.finish_termination_criteria()
