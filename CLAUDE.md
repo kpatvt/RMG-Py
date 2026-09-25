@@ -76,6 +76,10 @@ python -m pytest -m "functional"
 
 `pytest-xdist` (`-n auto`) is supported but **incompatible with RMS/Julia** — only use when RMS is not installed. Some test classes rely on their methods running in order within one process (e.g. `TestEnlarge.test_enlarge_1_...` to `_4_...` in `modelTest.py`, `TestTreeGeneration` in `familyTest.py`, `TestMain` in `mainTest.py`), so they can fail under `-n`; rerun such failures serially before assuming a regression.
 
+Two more pitfalls when running tests (or RMG/Arkane jobs) in parallel:
+- **Set `OPENBLAS_NUM_THREADS=1`.** Each process's OpenBLAS starts one busy-waiting thread per core, and with several processes the machine is heavily oversubscribed. The Arkane pressure-dependence examples (many eigendecompositions of small matrices) then slow down by 10x or more: `examples/arkane/networks/CH2NH2_mse` takes ~50 s alone but took 9+ minutes under `pytest -n 4`, which makes `test_arkane_examples` appear to hang.
+- **Arkane's electronic-structure adapters share `./scratch`** in the current working directory (`arkane/ess/adapter.py`) and delete it when done, so concurrent Arkane runs from the same directory (including `pytest -n` workers) can delete each other's scratch files and fail with an `UnboundLocalError` in `get_symmetry_properties`. Run Arkane tests serially or from separate directories.
+
 `test/conftest.py` forces `multiprocessing.set_start_method('fork')` and silences OpenBabel error logging. Be aware of the `fork` start method when adding tests that touch multiprocessing.
 
 ### Regression tests
