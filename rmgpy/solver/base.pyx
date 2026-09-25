@@ -279,11 +279,17 @@ cdef class ReactionSystem(DASx):
     def set_prunable_indices(self, edge_species, pdep_networks):
         cdef object spc
         cdef list temp
+        cdef dict edge_species_index
+        # Species compare by identity, so look up their (first) positions in the edge by id
+        # instead of calling edge_species.index() for each one, which scales quadratically
+        edge_species_index = {}
+        for i, spc in enumerate(edge_species):
+            edge_species_index.setdefault(id(spc), i)
         temp = []
         for i, spc in enumerate(self.prunable_species):
-            try:
-                temp.append(edge_species.index(spc))
-            except ValueError:
+            if id(spc) in edge_species_index:
+                temp.append(edge_species_index[id(spc)])
+            else:
                 self.max_edge_species_rate_ratios[i] = np.inf  #avoid pruning of species that have been moved to core
 
         self.prunable_species_indices = np.array(temp)
