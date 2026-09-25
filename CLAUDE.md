@@ -67,14 +67,14 @@ make test-database
 make test-all        # everything
 ```
 
-Run a subset directly:
+Run a subset directly (use `python -m pytest`, as the Makefile does: a bare `pytest` puts `test/` first on `sys.path`, where `test/rmgpy/` shadows the real `rmgpy` package and every import fails with `No module named 'rmgpy.molecule.graph'` etc.):
 ```bash
-pytest test/rmgpy/molecule/atomtypeTest.py
-pytest -k "test_pattern"
-pytest -m "functional"
+python -m pytest test/rmgpy/molecule/atomtypeTest.py
+python -m pytest -k "test_pattern"
+python -m pytest -m "functional"
 ```
 
-`pytest-xdist` (`-n auto`) is supported but **incompatible with RMS/Julia** — only use when RMS is not installed.
+`pytest-xdist` (`-n auto`) is supported but **incompatible with RMS/Julia** — only use when RMS is not installed. Some test classes rely on their methods running in order within one process (e.g. `TestEnlarge.test_enlarge_1_...` to `_4_...` in `modelTest.py`, `TestTreeGeneration` in `familyTest.py`, `TestMain` in `mainTest.py`), so they can fail under `-n`; rerun such failures serially before assuming a regression.
 
 `test/conftest.py` forces `multiprocessing.set_start_method('fork')` and silences OpenBabel error logging. Be aware of the `fork` start method when adding tests that touch multiprocessing.
 
@@ -88,6 +88,12 @@ python scripts/checkModels.py ...   # (see .github/workflows/CI.yml for arg shap
 Adding a new regression test means editing the **two lists** in [.github/workflows/CI.yml](.github/workflows/CI.yml) (Execution + Comparison steps); the first PR will fail CI until baseline artifacts exist on `main`.
 
 The `Makefile` also has `eg0`-`eg10` targets that copy example inputs into `testing/<name>/` and run `rmg.py` — useful for ad-hoc end-to-end smoke testing (`eg0` is fastest).
+
+**RMG runs are not bit-reproducible between processes unless `PYTHONHASHSEED` is fixed**: some iteration orders depend on string hashing, so two runs of the same code and input can differ in edge reactions and kinetics. When checking that a change does not alter the generated model (e.g. for performance work), run both versions with `PYTHONHASHSEED=0` and compare `chemkin/chem.inp` / `chem_edge.inp` (and `scripts/checkModels.py`). Even then, the order of third-body collider efficiencies in the Chemkin file can differ, because `write_kinetics_entry` in `rmgpy/chemkin.pyx` sorts them by `id()` (memory address).
+
+### Profiling
+
+`py-spy record --native -f raw -o profile.txt -- python rmg.py input.py` profiles a run including the compiled Cython modules, without rebuilding them with profiling enabled (`pip install py-spy`). It can also attach to a running job with `-p <pid>`. Keep in mind that database loading is a fixed cost of roughly 20–30 s, which dominates short runs such as the regression tests; use a larger input to see how model generation scales.
 
 ## Linting / formatting / typing
 
@@ -137,6 +143,7 @@ The `gh-pages` branch hosts the live site; CI publishes on push to `main`.
 ## Quick gotchas
 
 - **Edits to `.pyx`/`.pxd`/cythonized `.py` won't take effect until you rebuild** (`make build`). Mysterious unchanged behavior is almost always a stale `.so`.
+- **Don't rebuild while an RMG job is running from the same checkout.** `make build` overwrites the in-place `.so` files that the running process has loaded, which can crash it.
 - **`.so` files persist across branch switches.** When chasing a weird bug after a checkout, `make clean && make` before debugging.
 - **Don't use `--no-verify` or skip Cython rebuilds** to make a commit go through; the underlying issue will resurface in CI.
 - **Functional/database tests need RMG-database checked out** at a compatible branch in `../RMG-database`.
