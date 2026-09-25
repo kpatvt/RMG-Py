@@ -621,6 +621,10 @@ cdef class ReactionSystem(DASx):
         cdef np.ndarray[np.float64_t, ndim=1] forward_rate_coefficients, core_species_concentrations
         cdef double prev_time, total_moles, c, volume, RTP, max_char_rate, br, rr
         cdef double unimolecular_threshold_val, bimolecular_threshold_val, trimolecular_threshold_val
+        # Typed (boolean arrays viewed as uint8) so that the per-step threshold loops below index them in C
+        cdef np.ndarray[np.uint8_t, ndim=1, cast=True] unimolecular_threshold
+        cdef np.ndarray[np.uint8_t, ndim=2, cast=True] bimolecular_threshold
+        cdef np.ndarray[np.uint8_t, ndim=3, cast=True] trimolecular_threshold
         cdef bool useDynamicsTemp, first_time, use_dynamics, terminate_at_max_objects, schanged, invalid_objects_print_boolean
         cdef np.ndarray[np.float64_t, ndim=1] edge_reaction_rates
         cdef double reaction_rate, production, consumption
