@@ -89,6 +89,48 @@ class SpeciesConstraintException(ForbiddenStructureException):
         return ("Species constraints forbids product species {0}. Please reformulate constraints, "
                 "or explicitly allow it. Reason: {1}".format(self.struct, self.reason))
 
+def _reaction_formula_key(reaction):
+    """
+    Return a direction-independent key built from the fingerprints (formulas) of the reactants
+    and products of `reaction`, or ``None`` if any fingerprint is unavailable. Two reactions can
+    only be isomorphic (in either direction) if their keys are equal.
+    """
+    reactants = tuple(sorted(spc.fingerprint or '' for spc in reaction.reactants))
+    products = tuple(sorted(spc.fingerprint or '' for spc in reaction.products))
+    if '' in reactants or '' in products:
+        return None
+    return (reactants, products) if reactants <= products else (products, reactants)
+
+
+def _get_depository_candidates(depository, reaction):
+    """
+    Return the entries of `depository` that could be isomorphic to `reaction`, in their
+    original order. Entries are bucketed by :func:`_reaction_formula_key` so that each lookup
+    only runs the expensive isomorphism check against entries with matching formulas, instead
+    of against every entry in the depository.
+    """
+    key = _reaction_formula_key(reaction)
+    if key is None:
+        return list(depository.entries.values())
+    cache = getattr(depository, '_formula_index', None)
+    if cache is None or cache[0] != len(depository.entries):
+        index = {}
+        unindexed = []
+        for entry in depository.entries.values():
+            entry_key = _reaction_formula_key(entry.item)
+            if entry_key is None:
+                unindexed.append(entry)
+            else:
+                index.setdefault(entry_key, []).append(entry)
+        cache = (len(depository.entries), index, unindexed)
+        depository._formula_index = cache
+    _, index, unindexed = cache
+    candidates = index.get(key, [])
+    if unindexed:
+        # Keep the original entry order when some entries could not be indexed
+        wanted = {id(entry) for entry in candidates + unindexed}
+        return [entry for entry in depository.entries.values() if id(entry) in wanted]
+    return candidates
 
 ################################################################################
 
@@ -2568,7 +2610,7 @@ class KineticsFamily(Database):
         direction.
         """
         kinetics_list = []
-        entries = depository.entries.values()
+        entries = _get_depository_candidates(depository, reaction)
         for entry in entries:
             if entry.item.is_isomorphic(reaction):
                 kinetics_list.append(
