@@ -1495,12 +1495,36 @@ def read_reactions_block(f, species_dict, read_comments=True):
     return reaction_list
 
 
+# Cache of species identifiers and collider matches, only used while save_chemkin() writes its files
+_write_cache = None
+
+
 def get_species_identifier(species):
     """
     Return a string identifier for the provided `species` that can be used in a
     Chemkin file. Although the Chemkin format allows up to 16 characters for a
     species identifier, this function uses a maximum of 10 to ensure that all
     reaction equations fit in the maximum limit of 52 characters.
+    """
+    cache = _write_cache
+    if cache is None:
+        return _get_species_identifier(species)
+    # While writing a set of Chemkin files, each species is referenced many times, so its identifier is
+    # only determined once (as long as the attributes it depends on are unchanged)
+    molecule = species.molecule[0] if species.molecule else None
+    key = ('identifier', id(species))
+    entry = cache.get(key)
+    if (entry is not None and entry[0] is species and entry[1] == species.label and entry[2] == species.index
+            and entry[3] == species.reactive and entry[4] is molecule):
+        return entry[5]
+    identifier = _get_species_identifier(species)
+    cache[key] = (species, species.label, species.index, species.reactive, molecule, identifier)
+    return identifier
+
+
+def _get_species_identifier(species):
+    """
+    Return the Chemkin identifier of `species`, see :func:`get_species_identifier`.
     """
     label = species.label
     # Special case for inert colliders - just use the label if possible
@@ -1744,6 +1768,29 @@ def write_reaction_string(reaction, java_library=False):
 ################################################################################
 
 
+def _find_collider_species(collider, species_list):
+    """
+    Return the first species in `species_list` with a molecule isomorphic to the `collider` molecule
+    of a collider efficiency, or ``None``. While save_chemkin() writes its files, the result is cached,
+    since the same colliders appear in many reactions.
+    """
+    cache = _write_cache
+    if cache is not None:
+        key = ('collider', id(collider), id(species_list))
+        entry = cache.get(key)
+        if (entry is not None and entry[0] is collider and entry[1] is species_list
+                and entry[2] == len(species_list)):
+            return entry[3]
+    match = None
+    for species in species_list:
+        if any([collider.is_isomorphic(molecule) for molecule in species.molecule]):
+            match = species
+            break
+    if cache is not None:
+        cache[key] = (collider, species_list, len(species_list), match)
+    return match
+
+
 def write_kinetics_entry(reaction, species_list, verbose=True, java_library=False, commented=False):
     """
     Return a string representation of the reaction as used in a Chemkin
@@ -1904,10 +1951,9 @@ def write_kinetics_entry(reaction, species_list, verbose=True, java_library=Fals
     if isinstance(kinetics, (_kinetics.ThirdBody, _kinetics.Lindemann, _kinetics.Troe)):
         # Write collider efficiencies
         for collider, efficiency in sorted(list(kinetics.efficiencies.items()), key=lambda item: id(item[0])):
-            for species in species_list:
-                if any([collider.is_isomorphic(molecule) for molecule in species.molecule]):
-                    string += '{0!s}/{1:<4.2f}/ '.format(get_species_identifier(species), efficiency)
-                    break
+            match = _find_collider_species(collider, species_list)
+            if match is not None:
+                string += '{0!s}/{1:<4.2f}/ '.format(get_species_identifier(match), efficiency)
         string += '\n'
 
         if isinstance(kinetics, (_kinetics.Lindemann, _kinetics.Troe)):
@@ -2260,6 +2306,19 @@ def save_chemkin(reaction_model, path, verbose_path, dictionary_path=None, trans
     species and reactions to `path`. If `save_edge_species` is True, then
     a chemkin file and dictionary file for the core AND edge species and reactions
     will be saved.  It also saves verbose versions of each file.
+    """
+    global _write_cache
+    previous_cache = _write_cache
+    _write_cache = {}
+    try:
+        _save_chemkin(reaction_model, path, verbose_path, dictionary_path, transport_path, save_edge_species)
+    finally:
+        _write_cache = previous_cache
+
+
+def _save_chemkin(reaction_model, path, verbose_path, dictionary_path, transport_path, save_edge_species):
+    """
+    Write the files of :func:`save_chemkin`.
     """
     from rmgpy.rmg.model import ReactionModel
     if save_edge_species:
