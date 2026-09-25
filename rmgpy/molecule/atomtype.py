@@ -919,6 +919,10 @@ def get_features(atom, bonds):
     return features
 
 
+# Cache of the atom types determined by get_atomtype, keyed by element symbol and features
+_atomtype_cache = {}
+
+
 def get_atomtype(atom, bonds):
     """
     Determine the appropriate atom type for an :class:`Atom` object `atom`
@@ -926,7 +930,7 @@ def get_atomtype(atom, bonds):
     """
 
     cython.declare(atom_symbol=str)
-    cython.declare(mol_feature_list=cython.list, atomtype_feature_list=cython.list)
+    cython.declare(mol_feature_list=cython.list, atomtype_feature_list=cython.list, key=tuple)
 
     # Use element and counts to determine proper atom type
     atom_symbol = atom.symbol
@@ -935,6 +939,12 @@ def get_atomtype(atom, bonds):
         return ATOMTYPES[atom_symbol]
 
     mol_feature_list = get_features(atom, bonds)
+    # The atom type only depends on the element and the features, and there are few distinct
+    # combinations, so the result is cached instead of testing every specific atom type again
+    key = (atom_symbol, tuple(mol_feature_list))
+    specific_atom_type = _atomtype_cache.get(key)
+    if specific_atom_type is not None:
+        return specific_atom_type
     for specific_atom_type in ATOMTYPES[atom_symbol].specific:
         atomtype_feature_list = specific_atom_type.get_features()
         for mol_feature, atomtype_feature in zip(mol_feature_list, atomtype_feature_list):
@@ -943,6 +953,7 @@ def get_atomtype(atom, bonds):
             elif mol_feature not in atomtype_feature:
                 break
         else:
+            _atomtype_cache[key] = specific_atom_type
             return specific_atom_type
     else:
         single, all_double, r_double, o_double, s_double, triple, quadruple, benzene, lone_pairs, charge = mol_feature_list
