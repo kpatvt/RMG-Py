@@ -71,6 +71,7 @@ from rmgpy.kinetics.diffusionLimited import diffusion_limiter
 from rmgpy.molecule import Molecule
 from rmgpy.qm.main import QMDatabaseWriter
 from rmgpy.reaction import Reaction
+import rmgpy.rmg.database_cache as database_cache
 from rmgpy.rmg.listener import SimulationProfilePlotter, SimulationProfileWriter
 from rmgpy.rmg.model import CoreEdgeReactionModel, Species
 from rmgpy.rmg.output import OutputHTMLWriter
@@ -441,6 +442,17 @@ class RMG(util.Subject):
             Pt111_adsorption = "adsorptionSIDTPt111"
         else:
             Pt111_adsorption = "adsorptionPt111"
+        cache_file = database_cache.get_cache_file(self)
+        database = database_cache.load(cache_file) if cache_file else None
+        if database is not None:
+            # The cached database was prepared with identical settings; only the side effects
+            # on this job (rather than on the database) remain to be done
+            self.database = database
+            self._detect_trimolecular_families()
+            self.check_libraries()
+            self._set_solvent_global()
+            return
+
         self.database = RMGDatabase()
         self.database.load(
             path=self.database_directory,
@@ -465,19 +477,7 @@ class RMG(util.Subject):
                     family.reverse_recipe = None
                     family.reverse = None
 
-        # Determine if trimolecular families are present
-        for family in self.database.kinetics.families.values():
-            if len(family.forward_template.reactants) > 2:
-                logging.info("Trimolecular reactions are turned on")
-                self.trimolecular = True
-                break
-        # Only check products if we want to react them
-        if not self.trimolecular and self.trimolecular_product_reversible:
-            for family in self.database.kinetics.families.values():
-                if len(family.forward_template.products) > 2:
-                    logging.info("Trimolecular reactions are turned on")
-                    self.trimolecular = True
-                    break
+        self._detect_trimolecular_families()
 
         # check libraries
         self.check_libraries()
@@ -486,10 +486,7 @@ class RMG(util.Subject):
         if self.binding_energies:
             self.database.thermo.set_binding_energies(self.binding_energies)
 
-        # set global variable solvent
-        if self.solvent:
-            global solvent
-            solvent = self.solvent
+        self._set_solvent_global()
 
         # add any forbidden structures in the input file to the forbidden structures database
         for forbidden_structure_entry in self.forbidden_structures:
@@ -537,6 +534,35 @@ class RMG(util.Subject):
                     family.fill_rules_by_averaging_up(verbose=self.verbose_comments)
 
         self.database.thermo.adsorption_groups = self.adsorption_groups
+
+        if cache_file:
+            database_cache.save(self.database, cache_file)
+
+    def _detect_trimolecular_families(self):
+        """
+        Turn on trimolecular reactions if any (reversible) kinetics family has three reactants
+        (or products).
+        """
+        for family in self.database.kinetics.families.values():
+            if len(family.forward_template.reactants) > 2:
+                logging.info("Trimolecular reactions are turned on")
+                self.trimolecular = True
+                break
+        # Only check products if we want to react them
+        if not self.trimolecular and self.trimolecular_product_reversible:
+            for family in self.database.kinetics.families.values():
+                if len(family.forward_template.products) > 2:
+                    logging.info("Trimolecular reactions are turned on")
+                    self.trimolecular = True
+                    break
+
+    def _set_solvent_global(self):
+        """
+        Set the global variable `solvent` of this module.
+        """
+        if self.solvent:
+            global solvent
+            solvent = self.solvent
 
     def initialize(self, **kwargs):
         """
