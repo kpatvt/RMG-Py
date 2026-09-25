@@ -3049,12 +3049,31 @@ class Molecule(Graph):
 
         If ``strict=False``, performs the check ignoring electrons and resonance structures.
         """
-        cython.declare(atom_ids=set, other_ids=set, atom_list=list, other_list=list, mapping=dict)
+        cython.declare(atom_ids=set, other_ids=set, atom_list=list, other_list=list, mapping=dict, other_by_id=dict,
+                       atom=Atom, other_atom=Atom)
         from rmgpy.molecule.fragment import Fragment
 
         if not isinstance(other, (Molecule, Fragment)):
             raise TypeError(
                 'Got a {0} object for parameter "other", when a Molecule object is required.'.format(other.__class__))
+
+        # Fast path when the atom IDs are unique in both molecules (as they normally are): then
+        # pairing up the atoms with the same ID gives the same mapping as the sorted lists below
+        if len(self.vertices) == len(other.vertices):
+            other_by_id = {}
+            for atom in other.vertices:
+                other_by_id[atom.id] = atom
+            if len(other_by_id) == len(other.vertices):
+                mapping = {}
+                for atom in self.vertices:
+                    other_atom = other_by_id.pop(atom.id, None)
+                    if other_atom is None:
+                        # Either the ID is not in other, or it occurs more than once in self; the
+                        # general code below handles both cases
+                        break
+                    mapping[atom] = other_atom
+                else:
+                    return self.is_mapping_valid(other, mapping, equivalent=True, strict=strict)
 
         # Get a set of atom indices for each molecule
         atom_ids = set([atom.id for atom in self.vertices])
