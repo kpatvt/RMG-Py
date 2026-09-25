@@ -1507,9 +1507,9 @@ class KineticsFamily(Database):
         # Make sure we don't create a different net charge between reactants and products
         reactant_net_charge = product_net_charge = 0
         for struc in reactant_structures:
-            if isinstance(struc, Molecule):
-                struc.update(sort_atoms=not self.save_order)
-            else:
+            # Reactant molecules are unmodified (the recipe was applied to copies) and already
+            # up to date, so only groups need updating before their charge is read
+            if not isinstance(struc, Molecule):
                 struc.update()
             reactant_net_charge += struc.get_net_charge()
 
