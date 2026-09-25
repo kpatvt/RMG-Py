@@ -100,6 +100,15 @@ solvent = None
 maxproc = 1
 
 
+def _freeze_after_full_collection(phase, info):
+    """
+    Garbage collector callback that moves all surviving objects into the permanent generation
+    after each full collection, so that later collections do not traverse them again.
+    """
+    if phase == 'stop' and info['generation'] == 2:
+        gc.freeze()
+
+
 class RMG(util.Subject):
     """
     A representation of a Reaction Mechanism Generator (RMG) job. The
@@ -627,12 +636,17 @@ class RMG(util.Subject):
             self.reaction_libraries = to_reaction_library_tuples(self.reaction_libraries, output_edge)
 
         # Load databases
-        self.load_database()
-
         # The database holds millions of long-lived objects that stay in memory for the whole run.
-        # Move them into the permanent generation so that the cyclic garbage collector does not
-        # traverse them again during every full collection, which otherwise costs a large fraction
-        # of the run time during model generation.
+        # Without intervention, every full collection of the cyclic garbage collector traverses all
+        # of the objects loaded so far, which costs a large fraction of the loading time and, later,
+        # of the model generation time. Objects that survive a full collection are reachable, so
+        # while loading, they are moved into the permanent generation after each full collection,
+        # and once loading is complete, everything that is left is collected and frozen as well.
+        gc.callbacks.append(_freeze_after_full_collection)
+        try:
+            self.load_database()
+        finally:
+            gc.callbacks.remove(_freeze_after_full_collection)
         gc.collect()
         gc.freeze()
 
