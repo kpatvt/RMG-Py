@@ -102,6 +102,7 @@ class AtomType:
         self.label = label
         self.generic = generic or []
         self.specific = specific or []
+        self._specific_labels = None
         self.increment_bond = []
         self.decrement_bond = []
         self.form_bond = []
@@ -164,6 +165,7 @@ class AtomType:
         self.label = d['label']
         self.generic = d['generic']
         self.specific = d['specific']
+        self._specific_labels = None
         self.increment_bond = d['increment_bond']
         self.decrement_bond = d['decrement_bond']
         self.form_bond = d['form_bond']
@@ -204,14 +206,31 @@ class AtomType:
         equivalent or ``False``  otherwise. This function respects wildcards,
         e.g. ``R!H`` is equivalent to ``C``.
         """
-        return self is other or self in other.specific or other in self.specific
+        return self is other or self.label in other._get_specific_labels() or other.label in self._get_specific_labels()
 
     def is_specific_case_of(self, other):
         """
         Returns ``True`` if atom type `atomType1` is a specific case of
         atom type `atomType2` or ``False``  otherwise.
         """
-        return self is other or self in other.specific
+        return self is other or self.label in other._get_specific_labels()
+
+    def _get_specific_labels(self):
+        """
+        Return the labels of the atom types in `specific` as a frozenset.
+
+        This is cached because the specificity checks are on the hot path of every
+        molecule-to-group isomorphism check, and a set lookup is much faster than
+        scanning the list (which has ~100 entries for wildcards like ``R!H``).
+        Atom type labels are unique, and the `specific` lists do not change after
+        this module has been loaded.
+        """
+        if self._specific_labels is None:
+            labels = set()
+            for a in self.specific:
+                labels.add(a if isinstance(a, str) else a.label)
+            self._specific_labels = frozenset(labels)
+        return self._specific_labels
 
     def get_features(self):
         """
