@@ -90,6 +90,14 @@ def _copy_props(props):
     return dict(props)
 
 
+# Cache of Atom hash values by element symbol, see Atom.__hash__
+_atom_hashes = {}
+
+
+def _atom_sorting_key(atom):
+    return atom.sorting_key
+
+
 class Atom(Vertex):
     """
     An atom. The attributes are:
@@ -192,7 +200,13 @@ class Atom(Vertex):
         """
         Define a custom hash method to allow Atom objects to be used in dictionaries and sets.
         """
-        return hash(('Atom', self.element.symbol))
+        # The hash only depends on the element, so it is computed once per element symbol
+        # (atoms are hashed very often, e.g. whenever a bond is added to a vertex's edge dict)
+        symbol = self.element.symbol
+        value = _atom_hashes.get(symbol)
+        if value is None:
+            value = _atom_hashes[symbol] = hash(('Atom', symbol))
+        return value
 
     def __eq__(self, other):
         """Method to test equality of two Atom objects."""
@@ -1324,7 +1338,18 @@ class Molecule(Graph):
         covalent bonds with the surface present. If no covalent surface bonds are present,
         all vdW bonds are removed.
         """
-        cython.declare(bond=Bond)
+        cython.declare(bond=Bond, vertex=Vertex, has_vdw=cython.bint)
+        # Most molecules have no vdW bonds, so check for them first
+        has_vdw = False
+        for vertex in self.vertices:
+            for bond in vertex.edges.values():
+                if bond.is_van_der_waals():
+                    has_vdw = True
+                    break
+            if has_vdw:
+                break
+        if not has_vdw:
+            return
         if self.has_covalent_surface_bond():
             return # preserve any vdW bonds if there's also a covalent X
         for bond in self.get_all_edges():
@@ -1346,7 +1371,9 @@ class Molecule(Graph):
             if vertex.sorting_label < 0:
                 self.update_connectivity_values()
                 break
-        self.vertices.sort(reverse=True)
+        # Sorting by the sorting keys gives the same order as comparing the atoms themselves (which
+        # compares their sorting keys), but computes each key once instead of for every comparison
+        self.vertices.sort(key=_atom_sorting_key, reverse=True)
         for index, vertex in enumerate(self.vertices):
             vertex.sorting_label = index
 
