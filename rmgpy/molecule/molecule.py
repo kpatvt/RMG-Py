@@ -2589,9 +2589,10 @@ class Molecule(Graph):
         """
         Performs ring perception and saves ring membership information to the Atom.props attribute.
         """
-        cython.declare(atom=Atom)
+        cython.declare(atom=Atom, cyclic_ids=set)
+        cyclic_ids = {id(atom) for atom in self.get_all_cyclic_vertices()}
         for atom in self.vertices:
-            atom.props["inRing"] = self.is_vertex_in_cycle(atom)
+            atom.props["inRing"] = id(atom) in cyclic_ids
 
     def count_aromatic_rings(self):
         """

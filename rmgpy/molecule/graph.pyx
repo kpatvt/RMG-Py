@@ -554,35 +554,90 @@ cdef class Graph(object):
         """
         return vf2.find_subgraph_isomorphisms(self, other, initial_map, save_order=save_order)
 
+    cpdef set _find_bridges(self, list roots):
+        """
+        Return the set of bridges (edges whose removal disconnects the graph) in
+        the connected components containing the vertices in `roots`, using an
+        iterative version of Tarjan's O(V+E) lowlink algorithm.
+
+        Each bridge is stored twice, as ``(id(vertex1), id(vertex2))`` and
+        ``(id(vertex2), id(vertex1))``. An edge lies on a cycle if and only if
+        it is not a bridge, and a vertex lies on a cycle if and only if at least
+        one of its edges is not a bridge. Vertex ids are used as keys because
+        vertices hash on their element, which collides heavily.
+        """
+        cdef dict disc = {}, low = {}
+        cdef set bridges = set()
+        cdef list stack
+        cdef Vertex root, v, w, parent
+        cdef int timer = 0
+        cdef bint advanced
+        for root in roots:
+            if id(root) in disc:
+                continue
+            disc[id(root)] = low[id(root)] = timer
+            timer += 1
+            stack = [(root, None, iter(root.edges))]
+            while stack:
+                v, parent, it = stack[-1]
+                advanced = False
+                for w in it:
+                    if w is parent:
+                        continue
+                    if id(w) in disc:
+                        if disc[id(w)] < low[id(v)]:
+                            low[id(v)] = disc[id(w)]
+                    else:
+                        disc[id(w)] = low[id(w)] = timer
+                        timer += 1
+                        stack.append((w, v, iter(w.edges)))
+                        advanced = True
+                        break
+                if not advanced:
+                    stack.pop()
+                    if parent is not None:
+                        if low[id(v)] < low[id(parent)]:
+                            low[id(parent)] = low[id(v)]
+                        if low[id(v)] > disc[id(parent)]:
+                            bridges.add((id(parent), id(v)))
+                            bridges.add((id(v), id(parent)))
+        return bridges
+
     cpdef bint is_cyclic(self) except -2:
         """
         Return ``True`` if one or more cycles are present in the graph or
         ``False`` otherwise.
         """
         cdef Vertex vertex
+        cdef int num_edges = 0
         for vertex in self.vertices:
-            if self.is_vertex_in_cycle(vertex):
-                return True
-        return False
+            num_edges += len(vertex.edges)
+        # num_edges counts every edge twice, as does the set of bridges
+        return num_edges > len(self._find_bridges(self.vertices))
 
     cpdef bint is_vertex_in_cycle(self, Vertex vertex) except -2:
         """
         Return ``True`` if the given `vertex` is contained in one or more
         cycles in the graph, or ``False`` if not.
         """
-        return self._is_chain_in_cycle([vertex])
+        cdef set bridges
+        cdef Vertex other
+        if len(vertex.edges) < 2:
+            return False
+        bridges = self._find_bridges([vertex])
+        for other in vertex.edges:
+            if (id(vertex), id(other)) not in bridges:
+                return True
+        return False
 
     cpdef bint is_edge_in_cycle(self, Edge edge) except -2:
         """
         Return :data:`True` if the edge between vertices `vertex1` and `vertex2`
         is in one or more cycles in the graph, or :data:`False` if not.
         """
-        cdef list cycles
-        cycles = self.get_all_cycles(edge.vertex1)
-        for cycle in cycles:
-            if edge.vertex2 in cycle:
-                return True
-        return False
+        if len(edge.vertex1.edges) < 2 or len(edge.vertex2.edges) < 2:
+            return False
+        return (id(edge.vertex1), id(edge.vertex2)) not in self._find_bridges([edge.vertex1])
 
     cpdef bint _is_chain_in_cycle(self, list chain) except -2:
         """
@@ -614,11 +669,15 @@ cdef class Graph(object):
         Returns all vertices belonging to one or more cycles.        
         """
         cdef list cyclic_vertices
-        # Loop through all vertices and check whether they are cyclic
+        cdef set bridges
+        cdef Vertex vertex, other
+        bridges = self._find_bridges(self.vertices)
         cyclic_vertices = []
         for vertex in self.vertices:
-            if self.is_vertex_in_cycle(vertex):
-                cyclic_vertices.append(vertex)
+            for other in vertex.edges:
+                if (id(vertex), id(other)) not in bridges:
+                    cyclic_vertices.append(vertex)
+                    break
         return cyclic_vertices
 
     cpdef list get_all_cycles(self, Vertex starting_vertex):

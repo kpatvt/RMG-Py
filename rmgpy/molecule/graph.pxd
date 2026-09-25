@@ -118,6 +118,8 @@ cdef class Graph(object):
 
     cpdef list find_subgraph_isomorphisms(self, Graph other, dict initial_map=?, bint save_order=?)
 
+    cpdef set _find_bridges(self, list roots)
+
     cpdef bint is_cyclic(self) except -2
 
     cpdef bint is_vertex_in_cycle(self, Vertex vertex) except -2
