@@ -270,6 +270,25 @@ def check_for_same_reactants(reactants):
         
     return reactants, same_reactants
 
+def _template_product_formulas(rxn):
+    """
+    Return the sorted formulas (fingerprints) of the species that are compared when checking
+    `rxn` for isomorphism with ``check_template_rxn_products=True``, or ``None`` if any of them
+    is unavailable. Two such reactions can only be isomorphic if these are equal.
+    """
+    is_forward = getattr(rxn, 'is_forward', None)
+    if is_forward is None:
+        return None
+    species = rxn.products if is_forward else rxn.reactants
+    formulas = []
+    for spc in species:
+        fingerprint = spc.fingerprint
+        if not fingerprint:
+            return None
+        formulas.append(fingerprint)
+    return tuple(sorted(formulas))
+
+
 def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kinetics_database=None,
                               kinetics_family=None, save_order=False, resonance=True):
     """
@@ -319,14 +338,23 @@ def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kine
     # We want to sort all the reactions into sublists composed of isomorphic reactions
     # with degenerate transition states
     sorted_rxns = []
+    # The product formulas of the reactions in each sublist. Reactions are compared by the
+    # isomorphism of their products, which requires matching formulas, so sublists with
+    # different product formulas can be skipped without running the isomorphism checks.
+    sorted_keys = []
     for rxn0 in selected_rxns:
         rxn0.ensure_species(save_order=save_order)
+        key0 = _template_product_formulas(rxn0)
         if len(sorted_rxns) == 0:
             # This is the first reaction, so create a new sublist
             sorted_rxns.append([rxn0])
+            sorted_keys.append(key0)
         else:
             # Loop through each sublist, which represents a unique reaction
-            for sub_list in sorted_rxns:
+            for sub_list, key in zip(sorted_rxns, sorted_keys):
+                if key0 is not None and key is not None and key0 != key:
+                    # The products cannot be isomorphic, so this is not the right sublist
+                    continue
                 # Try to determine if the current rxn0 is identical or isomorphic to any reactions in the sublist
                 isomorphic = False
                 identical = False
@@ -368,6 +396,7 @@ def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kine
             else:
                 # We did not break, which means that there was no isomorphic sublist, so create a new one
                 sorted_rxns.append([rxn0])
+                sorted_keys.append(key0)
 
     rxn_list = []
     for sub_list in sorted_rxns:
