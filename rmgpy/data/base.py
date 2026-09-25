@@ -1053,23 +1053,20 @@ class Database(object):
         elif not self.match_node_to_structure(root, structure, atoms, strict):
             return None
 
-        next_node = []
-        for child in root.children:
-            if self.match_node_to_structure(child, structure, atoms, strict):
-                next_node.append(child)
-
-        if len(next_node) == 1:
-            return self.descend_tree(structure, atoms, next_node[0], strict)
-        elif len(next_node) == 0:
-            if len(root.children) > 0 and root.children[-1].label.startswith('Others-'):
-                return root.children[-1]
-            else:
-                return root
-        else:
-            # logging.warning('For {0}, a node {1} with overlapping children {2} was encountered '
-            #                 'in tree with top level nodes {3}. Assuming the first match is the '
-            #                 'better one.'.format(structure, root, next, self.top))
-            return self.descend_tree(structure, atoms, next_node[0], strict)
+        # Descend iteratively. The first child that matches becomes the next root: if several
+        # children match (overlapping children), the first match is assumed to be the better one,
+        # so the remaining children do not need to be checked. The new root is not matched
+        # against the structure a second time.
+        while True:
+            for child in root.children:
+                if self.match_node_to_structure(child, structure, atoms, strict):
+                    root = child
+                    break
+            else:  # no child matched
+                if len(root.children) > 0 and root.children[-1].label.startswith('Others-'):
+                    return root.children[-1]
+                else:
+                    return root
 
     def are_siblings(self, node, node_other):
         """
