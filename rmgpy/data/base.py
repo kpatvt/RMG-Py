@@ -982,7 +982,7 @@ class Database(object):
             for label in centers.keys():
                 # Make sure the labels are in both group and structure.
                 if label not in atoms:
-                    logging.log(0, "Label {0} is in group {1} but not in structure".format(label, node))
+                    logging.log(0, "Label %s is in group %s but not in structure", label, node)
                     if strict:
                         # structure must match all labeled atoms in node if strict is set to True
                         return False
