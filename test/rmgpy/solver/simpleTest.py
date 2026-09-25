@@ -682,6 +682,13 @@ class SimpleReactorTest:
         )
         rxn_system.initialize_model(species_list, reaction_list, [], [])
 
+        # The residual (evaluated during initialization) must update the forward and reverse rate
+        # coefficients of every reaction with a specific collider consistently
+        indices = rxn_system.pdep_specific_collider_reaction_indices
+        assert len(indices) > 1
+        for j in indices:
+            assert np.isclose(rxn_system.kb[j], rxn_system.kf[j] / rxn_system.Keq[j], rtol=1e-12, atol=0)
+
         # Advance to time = 0.1 s
         rxn_system.advance(0.1)
         # Compare simulated mole fractions with expected mole fractions from CHEMKIN
