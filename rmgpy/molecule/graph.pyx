@@ -339,29 +339,33 @@ cdef class Graph(object):
 
         Each edge is copied once, and the new edges are inserted directly into the vertex
         edge dictionaries in the same order as :meth:`add_edge` would, without its linear
-        membership checks. Vertices are looked up by ``id`` because vertices hash on their
-        element, which collides heavily.
+        membership checks. Each edge is copied when it is first reached, i.e. from the vertex that
+        comes first in ``self.vertices``. Vertices are looked up by ``id`` because vertices hash on
+        their element, which collides heavily.
         """
         cdef Vertex vertex, vertex1, vertex2, new1, new2
         cdef Edge edge
-        cdef dict id_map = {}
-        cdef set copied = set()
+        cdef dict index_map = {}
         cdef list new_vertices
+        cdef Py_ssize_t index1, index2
 
-        for vertex in self.vertices:
+        new_vertices = other.vertices
+        for index1 in range(len(self.vertices)):
+            vertex = self.vertices[index1]
             new1 = vertex.copy()
             new1.edges = {}
-            other.vertices.append(new1)
-            id_map[id(vertex)] = new1
-        new_vertices = other.vertices
+            new_vertices.append(new1)
+            index_map[id(vertex)] = index1
 
-        for vertex1 in self.vertices:
+        for index1 in range(len(self.vertices)):
+            vertex1 = self.vertices[index1]
+            new1 = new_vertices[index1]
             for vertex2, edge in vertex1.edges.items():
-                if id(edge) in copied:
+                index2 = index_map[id(vertex2)]
+                if index2 < index1:
+                    # This edge was already copied when its other vertex was visited
                     continue
-                copied.add(id(edge))
-                new1 = id_map[id(vertex1)]
-                new2 = id_map[id(vertex2)]
+                new2 = new_vertices[index2]
                 edge = edge.copy()
                 # Orient the copy as the previous implementation did, which copied every
                 # edge from both ends and kept the copy made from the second end

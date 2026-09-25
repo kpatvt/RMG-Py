@@ -385,7 +385,9 @@ class Atom(Vertex):
         a.lone_pairs = self.lone_pairs
         a.site = self.site
         a.morphology = self.morphology
-        a.coords = self.coords[:]
+        # The coordinates are shared, which is what the slice this replaced did as well: slicing a
+        # numpy array creates a view of the same data, not a copy
+        a.coords = self.coords
         a.id = self.id
         a.props = _copy_props(self.props)
         return a
