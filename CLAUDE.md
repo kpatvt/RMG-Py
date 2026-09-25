@@ -25,6 +25,8 @@ make install
 
 `make install` runs `python utilities.py check-pydas` (which writes [rmgpy/solver/settings.pxi](rmgpy/solver/settings.pxi) — see Cython section), then `pip install --no-build-isolation -vv -e .`, then touches a `.installed` sentinel. Subsequent `make` invocations skip reinstall unless the sentinel is missing.
 
+**Claude Code on the web**: the SessionStart hook [.claude/hooks/session-start.sh](.claude/hooks/session-start.sh) (registered in [.claude/settings.json](.claude/settings.json)) performs these steps automatically in remote sessions: it installs Miniforge to `/opt/miniforge` (and points conda at the sandbox proxy's CA bundle), creates `rmg_env`, clones RMG-database to `../RMG-database`, runs `make install` (or `make build` if already installed), installs `pytest-xdist` and `py-spy`, and puts `rmg_env` on the `PATH`. Every step is skipped when already done. The first run takes ~20 minutes (the environment download is several GB); later sessions reuse the cached container. If you change `environment.yml`, the existing environment is not updated automatically; run `conda env update --file environment.yml --name rmg_env` (or remove `/opt/miniforge/envs/rmg_env` to have the hook recreate it). To run it by hand: `CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh`.
+
 **Always keep [environment.yml](environment.yml) and [.conda/meta.yaml](.conda/meta.yaml) in sync** — both define runtime deps and CI builds from `meta.yaml` for the conda package.
 
 Optional pieces:
