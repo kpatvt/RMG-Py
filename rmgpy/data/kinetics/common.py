@@ -289,6 +289,47 @@ def _template_product_formulas(rxn):
     return tuple(sorted(formulas))
 
 
+def _identity_signature(rxn):
+    """
+    Return, for each of the species compared when checking `rxn` for identity with
+    ``check_template_rxn_products=True``, the set of the atom ID sets of its molecules, or ``None``
+    if this is not possible.
+    """
+    is_forward = getattr(rxn, 'is_forward', None)
+    if is_forward is None:
+        return None
+    signature = []
+    for spc in (rxn.products if is_forward else rxn.reactants):
+        molecules = spc.molecule if isinstance(spc, Species) else [spc]
+        signature.append(frozenset(frozenset(atom.id for atom in mol.atoms) for mol in molecules))
+    return signature
+
+
+def _could_be_identical(signatures, rxn1, rxn2):
+    """
+    Return ``False`` if `rxn1` and `rxn2` can certainly not be identical (as checked by
+    ``Reaction.is_isomorphic(check_identical=True, check_template_rxn_products=True)``).
+
+    Two molecules can only be identical if they have the same set of atom IDs, so two species can
+    only be identical if one of their molecules' atom ID sets is the same, and the species lists
+    can only be identical if they can be paired up such that this is the case for each pair.
+    The signatures are cached in the dict `signatures` by reaction id.
+    """
+    for rxn in (rxn1, rxn2):
+        if id(rxn) not in signatures:
+            signatures[id(rxn)] = (rxn, _identity_signature(rxn))
+    signature1 = signatures[id(rxn1)][1]
+    signature2 = signatures[id(rxn2)][1]
+    if signature1 is None or signature2 is None:
+        return True
+    if len(signature1) != len(signature2):
+        return False
+    for order in itertools.permutations(range(len(signature2))):
+        if all(signature1[i] & signature2[j] for i, j in enumerate(order)):
+            return True
+    return False
+
+
 def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kinetics_database=None,
                               kinetics_family=None, save_order=False, resonance=True):
     """
@@ -342,6 +383,8 @@ def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kine
     # isomorphism of their products, which requires matching formulas, so sublists with
     # different product formulas can be skipped without running the isomorphism checks.
     sorted_keys = []
+    # Atom ID signatures of the reactions, see _could_be_identical()
+    identity_signatures = {}
     for rxn0 in selected_rxns:
         rxn0.ensure_species(save_order=save_order)
         key0 = _template_product_formulas(rxn0)
@@ -359,12 +402,16 @@ def find_degenerate_reactions(rxn_list, same_reactants=None, template=None, kine
                 isomorphic = False
                 identical = False
                 same_template = True
-                for rxn in sub_list:
-                    isomorphic = rxn0.is_isomorphic(rxn, check_identical=False, strict=False,
-                                                    check_template_rxn_products=True, save_order=save_order)
+                for index, rxn in enumerate(sub_list):
+                    if index == 0:
+                        isomorphic = rxn0.is_isomorphic(rxn, check_identical=False, strict=False,
+                                                        check_template_rxn_products=True, save_order=save_order)
+                    # else: all reactions in a sublist are isomorphic to its first reaction (and isomorphism
+                    # is transitive), so rxn0 is isomorphic to the others if it is isomorphic to the first
                     if isomorphic:
-                        identical = rxn0.is_isomorphic(rxn, check_identical=True, strict=False,
-                                                       check_template_rxn_products=True, save_order=save_order)
+                        identical = (_could_be_identical(identity_signatures, rxn0, rxn) and
+                                     rxn0.is_isomorphic(rxn, check_identical=True, strict=False,
+                                                        check_template_rxn_products=True, save_order=save_order))
                         if identical:
                             # An exact copy of rxn0 is already in our list, so we can move on
                             break
