@@ -528,7 +528,7 @@ and immediately used in input files without any additional changes.
         reaction_list = []
         for combo in combos:
             reaction_list.extend(self.react_molecules(combo, products=products, only_families=only_families,
-                                                      prod_resonance=resonance))
+                                                      prod_resonance=resonance, compress_symmetric=True))
 
         # Calculate reaction degeneracy
         reaction_list = find_degenerate_reactions(reaction_list, same_reactants, kinetics_database=self,
@@ -547,16 +547,20 @@ and immediately used in input files without any additional changes.
 
         return reaction_list
 
-    def react_molecules(self, molecules, products=None, only_families=None, prod_resonance=True):
+    def react_molecules(self, molecules, products=None, only_families=None, prod_resonance=True,
+                        compress_symmetric=False):
         """
         Generate reactions from all families for the input molecules.
+        If `compress_symmetric` is ``True``, the list may contain :class:`ShadowReaction` objects,
+        which :func:`find_degenerate_reactions` handles (and removes).
         """
         reaction_list = []
         for label, family in self.families.items():
             if only_families is None or label in only_families:
                 try:
                     reaction_list.extend(family.generate_reactions(molecules, products=products,
-                                                                   prod_resonance=prod_resonance))
+                                                                   prod_resonance=prod_resonance,
+                                                                   compress_symmetric=compress_symmetric))
                 except:
                     logging.error("Problem family: {}".format(label))
                     logging.error("Problem reactants: {}".format(molecules))

@@ -50,7 +50,8 @@ from rmgpy import settings
 from rmgpy.constraints import fails_species_constraints
 from rmgpy.data.base import Database, Entry, LogicNode, LogicOr, ForbiddenStructures, get_all_combinations
 from rmgpy.data.kinetics.common import save_entry, find_degenerate_reactions, generate_molecule_combos, \
-                                       ensure_independent_atom_ids, check_for_same_reactants
+                                       ensure_independent_atom_ids, check_for_same_reactants, ShadowReaction, \
+                                       shadow_identity_key, representative_bond_changes
 from rmgpy.data.kinetics.depository import KineticsDepository
 from rmgpy.data.kinetics.groups import KineticsGroups
 from rmgpy.data.kinetics.rules import KineticsRules
@@ -68,6 +69,10 @@ from rmgpy.tools.uncertainty import KineticParameterUncertainty
 from rmgpy.molecule.fragment import Fragment
 import rmgpy.constants as constants
 from rmgpy.data.solvation import SoluteData, add_solute_data, SoluteTSData, to_soluteTSdata
+
+# Whether reactions related to earlier ones by a symmetry of the reactants are generated as shadow
+# reactions (see ShadowReaction) where the caller allows it. This does not change the results.
+SYMMETRY_COMPRESSION = True
 
 ################################################################################
 
@@ -1858,7 +1863,8 @@ class KineticsFamily(Database):
         else:
             raise NotImplementedError("Not expecting template of type {}".format(type(struct)))
 
-    def generate_reactions(self, reactants, products=None, prod_resonance=True, delete_labels=True, relabel_atoms=True):
+    def generate_reactions(self, reactants, products=None, prod_resonance=True, delete_labels=True, relabel_atoms=True,
+                           compress_symmetric=False):
         """
         Generate all reactions between the provided list of one, two, or three
         `reactants`, which should be either single :class:`Molecule` objects
@@ -1877,6 +1883,10 @@ class KineticsFamily(Database):
                                              Default is ``True``, atom labels are deleted.
             relabel_atoms (bool, optional)   Whether to reverse product atom labels of reversible families.
                                              Default is ``True``, atoms are re-labeled.
+            compress_symmetric (bool, optional): Whether reactions related to earlier ones by a symmetry of
+                                             the reactants may be returned as :class:`ShadowReaction` objects,
+                                             which :func:`find_degenerate_reactions` handles (and removes).
+                                             Default is ``False``.
 
         Returns:
             List of all reactions containing Molecule objects with the
@@ -1893,6 +1903,7 @@ class KineticsFamily(Database):
                                      prod_resonance=prod_resonance,
                                      delete_labels=delete_labels,
                                      relabel_atoms=relabel_atoms,
+                                     compress_symmetric=compress_symmetric,
                                      ))
 
         if not self.own_reverse and self.reversible:
@@ -1904,6 +1915,7 @@ class KineticsFamily(Database):
                                          prod_resonance=prod_resonance,
                                          delete_labels=delete_labels,
                                          relabel_atoms=relabel_atoms,
+                                         compress_symmetric=compress_symmetric,
                                          ))
         return reaction_list
 
@@ -1934,7 +1946,8 @@ class KineticsFamily(Database):
 
             reaction_list = self._generate_reactions([spc.molecule for spc in rxn.products],
                                                      products=rxn.reactants, forward=True,
-                                                     react_non_reactive=react_non_reactive)
+                                                     react_non_reactive=react_non_reactive,
+                                                     compress_symmetric=True)
             reactions = find_degenerate_reactions(reaction_list, same_reactants, kinetics_family=self)
             if len(reactions) == 0:
                 logging.error("Expecting one matching reverse reaction, not zero in reaction family {0} for "
@@ -2022,7 +2035,8 @@ class KineticsFamily(Database):
         reactions = []
         for combo in molecule_combos:
             reactions.extend(self._generate_reactions(combo, products=reaction.products, forward=True,
-                                                      prod_resonance=resonance, react_non_reactive=True))
+                                                      prod_resonance=resonance, react_non_reactive=True,
+                                                      compress_symmetric=True))
 
         # remove degenerate reactions
         reactions = find_degenerate_reactions(reactions, same_reactants, template=reaction.template,
@@ -2040,7 +2054,8 @@ class KineticsFamily(Database):
         return reactions[0].degeneracy
 
     def _generate_reactions(self, reactants, products=None, forward=True, prod_resonance=True,
-                            react_non_reactive=False, delete_labels=True, relabel_atoms=True):
+                            react_non_reactive=False, delete_labels=True, relabel_atoms=True,
+                            compress_symmetric=False):
         """
         Generate a list of all the possible reactions of this family between
         the list of `reactants`. The number of reactants provided must match
@@ -2104,6 +2119,13 @@ class KineticsFamily(Database):
         else:
             template_reactants = [x.item for x in template.reactants]
 
+        # Whether reactions related to earlier ones by a symmetry of a reactant are generated as
+        # shadow reactions (see ShadowReaction), which requires the labels to be deleted afterwards
+        compress = (compress_symmetric and SYMMETRY_COMPRESSION and delete_labels
+                    and 'surface' not in self.label.lower()
+                    and all(type(molecule) is Molecule and not molecule.contains_surface_site()
+                            for molecules in reactants for molecule in molecules))
+
         # Unimolecular reactants: A --> products
         if len(reactants) == 1 and len(template_reactants) == 1:
 
@@ -2112,8 +2134,25 @@ class KineticsFamily(Database):
                 if molecule.reactive or react_non_reactive:  # don't react non representative resonance isomers unless
                     # explicitly desired (e.g., when called from calculate_degeneracy)
                     mappings = self._match_reactant_to_template(molecule, template_reactants[0])
-                    for mapping in mappings:
+                    classes = self._symmetry_classes(molecule, mappings) if compress else None
+                    representatives = {}
+                    skipped = None
+                    for index, mapping in enumerate(mappings):
                         reactant_structures = [molecule]
+                        skipped = None
+                        if classes is not None and classes[index] != index:
+                            # This mapping is related to an earlier one by a symmetry of the molecule
+                            skipped = (reactant_structures, [mapping])
+                            representative = representatives.get(classes[index])
+                            if representative is None:
+                                # No reaction was generated for the earlier mapping, so none is for this one
+                                continue
+                            shadow = self._make_shadow_reaction(representative, reactant_structures, [mapping],
+                                                                forward, relabel_atoms)
+                            if shadow is not None:
+                                rxn_list.append(shadow)
+                                continue
+                            skipped = None
                         try:
                             product_structures = self._generate_product_structures(reactant_structures,
                                                                                    [mapping],
@@ -2126,6 +2165,9 @@ class KineticsFamily(Database):
                                 rxn = self._create_reaction(reactant_structures, product_structures, forward)
                                 if rxn:
                                     rxn_list.append(rxn)
+                                    representatives[index] = [rxn, product_structures, [mapping], None]
+                    if skipped is not None:
+                        self._label_reactant_structures(*skipped)
         # Bimolecular reactants: A + B --> products
         elif len(reactants) == 2 and len(template_reactants) == 2:
 
@@ -2150,13 +2192,32 @@ class KineticsFamily(Database):
                         # Reactants stored as A + B
                         mappings_a = self._match_reactant_to_template(molecule_a, template_reactants[0])
                         mappings_b = self._match_reactant_to_template(molecule_b, template_reactants[1])
+                        classes_a = self._symmetry_classes(molecule_a, mappings_a) if compress else None
+                        classes_b = self._symmetry_classes(molecule_b, mappings_b) if compress else None
+                        representatives = {}
+                        skipped = None
 
                         # Iterate over each pair of matches (A, B)
-                        for map_a in mappings_a:
-                            for map_b in mappings_b:
+                        for index_a, map_a in enumerate(mappings_a):
+                            for index_b, map_b in enumerate(mappings_b):
                                 # Reverse the order of reactants in case we have a family with only one reactant tree
                                 # that can produce different products depending on the order of reactants
                                 reactant_structures = [molecule_b, molecule_a]
+                                skipped = None
+                                if compress:
+                                    classes = (classes_a[index_a], classes_b[index_b])
+                                    if classes != (index_a, index_b):
+                                        # This pair of mappings is related to an earlier one by a symmetry
+                                        skipped = (reactant_structures, [map_b, map_a])
+                                        representative = representatives.get(classes)
+                                        if representative is None:
+                                            continue
+                                        shadow = self._make_shadow_reaction(representative, reactant_structures,
+                                                                            [map_b, map_a], forward, relabel_atoms)
+                                        if shadow is not None:
+                                            rxn_list.append(shadow)
+                                            continue
+                                        skipped = None
                                 try:
                                     product_structures = self._generate_product_structures(reactant_structures,
                                                                                            [map_b, map_a],
@@ -2169,6 +2230,11 @@ class KineticsFamily(Database):
                                         rxn = self._create_reaction(reactant_structures, product_structures, forward)
                                         if rxn:
                                             rxn_list.append(rxn)
+                                            if compress:
+                                                representatives[(index_a, index_b)] = [rxn, product_structures,
+                                                                                       [map_b, map_a], None]
+                        if skipped is not None:
+                            self._label_reactant_structures(*skipped)
 
                         # Only check for swapped reactants if they are different
                         if reactants[0] is not reactants[1]:
@@ -2176,11 +2242,31 @@ class KineticsFamily(Database):
                             # Reactants stored as B + A
                             mappings_a = self._match_reactant_to_template(molecule_a, template_reactants[1])
                             mappings_b = self._match_reactant_to_template(molecule_b, template_reactants[0])
+                            classes_a = self._symmetry_classes(molecule_a, mappings_a) if compress else None
+                            classes_b = self._symmetry_classes(molecule_b, mappings_b) if compress else None
+                            representatives = {}
+                            skipped = None
 
                             # Iterate over each pair of matches (A, B)
-                            for map_a in mappings_a:
-                                for map_b in mappings_b:
+                            for index_a, map_a in enumerate(mappings_a):
+                                for index_b, map_b in enumerate(mappings_b):
                                     reactant_structures = [molecule_a, molecule_b]
+                                    skipped = None
+                                    if compress:
+                                        classes = (classes_a[index_a], classes_b[index_b])
+                                        if classes != (index_a, index_b):
+                                            # This pair of mappings is related to an earlier one by a symmetry
+                                            skipped = (reactant_structures, [map_a, map_b])
+                                            representative = representatives.get(classes)
+                                            if representative is None:
+                                                continue
+                                            shadow = self._make_shadow_reaction(representative, reactant_structures,
+                                                                                [map_a, map_b], forward,
+                                                                                relabel_atoms)
+                                            if shadow is not None:
+                                                rxn_list.append(shadow)
+                                                continue
+                                            skipped = None
                                     try:
                                         product_structures = self._generate_product_structures(reactant_structures,
                                                                                                [map_a, map_b],
@@ -2194,6 +2280,11 @@ class KineticsFamily(Database):
                                                                         forward)
                                             if rxn:
                                                 rxn_list.append(rxn)
+                                                if compress:
+                                                    representatives[(index_a, index_b)] = [rxn, product_structures,
+                                                                                           [map_a, map_b], None]
+                            if skipped is not None:
+                                self._label_reactant_structures(*skipped)
 
         # Termolecular reactants: A + B + C --> products
         elif len(reactants) == 2 and len(template_reactants) == 3:
@@ -2406,45 +2497,151 @@ class KineticsFamily(Database):
         if products is not None:
             rxn_list0 = rxn_list[:]
             rxn_list = []
+            kept = set()
             for reaction in rxn_list0:
+                if isinstance(reaction, ShadowReaction):
+                    # The products of a shadow reaction are isomorphic to those of its representative
+                    if id(reaction.representative) in kept:
+                        rxn_list.append(reaction)
+                    continue
                 products0 = reaction.products if forward else reaction.reactants
                 # Only keep reactions which give the requested products
                 # If prod_resonance=True, then use strict=False to consider all resonance structures
                 if same_species_lists(products, products0, strict=not prod_resonance, save_order=self.save_order):
                     rxn_list.append(reaction)
+                    kept.add(id(reaction))
 
         # Determine the reactant-product pairs to use for flux analysis
         # Also store the reaction template (useful so we can easily get the kinetics later)
         for reaction in rxn_list:
-
-            # Restore the labeled atoms long enough to generate some metadata
-            for reactant in reaction.reactants:
-                reactant.clear_labeled_atoms()
-            for label, atom in reaction.labeled_atoms['reactants'].items():
-                if isinstance(atom, list):
-                    for atm in atom:
-                        atm.label = label
-                else:
-                    atom.label = label
-
-            # Generate metadata about the reaction that we will need later
-            reaction.pairs = self.get_reaction_pairs(reaction)
-            reaction.template = self.get_reaction_template_labels(reaction)
-
-            if delete_labels:
-                # Unlabel the atoms for both reactants and products
-                for species in itertools.chain(reaction.reactants, reaction.products):
-                    species.clear_labeled_atoms()
-
-                # We're done with the labeled atoms, so delete the attribute
-                del reaction.labeled_atoms
-
-            # Mark reaction reversibility
-            reaction.reversible = self.reversible
+            if isinstance(reaction, ShadowReaction):
+                # The representative (which precedes it) has the same template
+                reaction.template = reaction.representative.template
+                continue
+            self._add_reaction_metadata(reaction, delete_labels)
 
         # This reaction list has only checked for duplicates within itself, not
         # with the global list of reactions
         return rxn_list
+
+    def _add_reaction_metadata(self, reaction, delete_labels):
+        """
+        Add the reactant-product pairs and the template to the newly generated `reaction`, and
+        delete its atom labels if `delete_labels` is ``True``.
+        """
+        # Restore the labeled atoms long enough to generate some metadata
+        for reactant in reaction.reactants:
+            reactant.clear_labeled_atoms()
+        for label, atom in reaction.labeled_atoms['reactants'].items():
+            if isinstance(atom, list):
+                for atm in atom:
+                    atm.label = label
+            else:
+                atom.label = label
+
+        # Generate metadata about the reaction that we will need later
+        reaction.pairs = self.get_reaction_pairs(reaction)
+        reaction.template = self.get_reaction_template_labels(reaction)
+
+        if delete_labels:
+            # Unlabel the atoms for both reactants and products
+            for species in itertools.chain(reaction.reactants, reaction.products):
+                species.clear_labeled_atoms()
+
+            # We're done with the labeled atoms, so delete the attribute
+            del reaction.labeled_atoms
+
+        # Mark reaction reversibility
+        reaction.reversible = self.reversible
+
+    def _symmetry_classes(self, molecule, mappings):
+        """
+        Group the template `mappings` (from atoms of `molecule` to template group atoms) into classes
+        of mappings related by automorphisms of `molecule`, i.e. mappings `m1` and `m2` for which an
+        automorphism maps the atom that `m1` maps to each group atom onto the atom that `m2` maps to
+        it. Two such mappings produce isomorphic reactions with the same template, which all checks
+        of the family treat alike. Returns a list with the index of the first mapping of its class
+        for each mapping.
+        """
+        count = len(mappings)
+        classes = list(range(count))
+        if count < 2:
+            return classes
+        # Automorphism-invariant descriptions of the atoms, to avoid most isomorphism checks
+        invariants = {}
+        for atom in molecule.atoms:
+            invariants[atom] = (atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
+                                atom.lone_pairs, tuple(sorted([(neighbor.element.symbol, neighbor.radical_electrons,
+                                                                neighbor.charge, bond.order)
+                                                               for neighbor, bond in atom.edges.items()])))
+        inverses = []
+        buckets = {}
+        copy = None
+        to_copy = None
+        for index, mapping in enumerate(mappings):
+            inverse = {group_atom: atom for atom, group_atom in mapping.items()}
+            inverses.append(inverse)
+            group_atoms = sorted(inverse, key=id)
+            signature = tuple([(id(group_atom), invariants[inverse[group_atom]]) for group_atom in group_atoms])
+            for other in buckets.get(signature, ()):
+                if copy is None:
+                    # Isomorphism checks need two distinct graphs
+                    copy = molecule.copy(deep=True)
+                    to_copy = dict(zip(molecule.atoms, copy.atoms))
+                other_inverse = inverses[other]
+                initial_map = {other_inverse[group_atom]: to_copy[inverse[group_atom]] for group_atom in group_atoms}
+                if molecule.is_isomorphic(copy, initial_map=initial_map):
+                    classes[index] = other
+                    break
+            else:
+                buckets.setdefault(signature, []).append(index)
+        return classes
+
+    @staticmethod
+    def _label_reactant_structures(reactant_structures, maps):
+        """
+        Label the atoms of `reactant_structures` according to the template `maps`, as
+        :meth:`_generate_product_structures` does first. This is done for the last mapping of a
+        loop if it was not generated, since the labels are left on the reactants otherwise.
+        """
+        for struct in reactant_structures:
+            struct.clear_labeled_atoms()
+        for m in maps:
+            for reactant_atom, template_atom in m.items():
+                reactant_atom.label = template_atom.label
+
+    def _make_shadow_reaction(self, representative, reactant_structures, maps, forward, relabel_atoms):
+        """
+        Return a :class:`ShadowReaction` for the reaction that the template `maps` generate from
+        `reactant_structures`, which are related by an automorphism of the reactants to the maps of
+        the `representative`, a tuple of the reaction generated from the same reactant structures,
+        its product structures, its maps and its bond changes (see :func:`representative_bond_changes`, computed
+        when first needed). Returns ``None`` if a shadow reaction cannot be used.
+        """
+        rxn, product_structures, representative_maps, bond_changes = representative
+        if bond_changes is None:
+            bond_changes = representative[3] = representative_bond_changes(reactant_structures, product_structures,
+                                                                           representative_maps)
+            if bond_changes is None:
+                bond_changes = representative[3] = False
+        if bond_changes is False:
+            return None
+        key = shadow_identity_key(bond_changes, maps)
+        if key is None:
+            return None
+        reactant_structures = list(reactant_structures)
+        maps = list(maps)
+
+        def materialize():
+            products = self._generate_product_structures(reactant_structures, maps, forward, relabel_atoms)
+            reaction = self._create_reaction(list(reactant_structures), products, forward)
+            if reaction is None:
+                raise KineticsError('Unable to generate the reaction of a shadow reaction of {0} in family {1}'
+                                    ''.format(rxn, self.label))
+            self._add_reaction_metadata(reaction, delete_labels=True)
+            return reaction
+
+        return ShadowReaction(rxn, key, materialize)
 
     def get_reaction_pairs(self, reaction):
         """
