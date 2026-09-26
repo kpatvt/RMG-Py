@@ -265,9 +265,24 @@ cdef class SimpleReactor(ReactionSystem):
         and (effective) pressure of the reaction system.
         """
 
+        # Compute the effective pressures as calculate_effective_pressure() does, without searching
+        # the pressure-dependent reactions with collider efficiencies for each reaction
+        y0_core_species = self.y0[:self.num_core_species]
+        sum_core_species = np.sum(y0_core_species)
+        collision_indices = {}
+        for i in range(self.pdep_collision_reaction_indices.shape[0]):
+            collision_indices.setdefault(int(self.pdep_collision_reaction_indices[i]), i)
+
         for rxn in itertools.chain(core_reactions, edge_reactions):
             j = self.reaction_index[rxn]
-            Peff = self.calculate_effective_pressure(rxn)
+            i = collision_indices.get(j, -1)
+            if i < 0:
+                Peff = self.P.value_si
+            elif rxn.specific_collider is None:
+                Peff = self.P.value_si * np.sum(self.collider_efficiencies[i] * y0_core_species / sum_core_species)
+            else:
+                logging.debug("Calculating Peff using {0} as a specific_collider".format(rxn.specific_collider))
+                Peff = self.P.value_si * self.y0[self.species_index[rxn.specific_collider]] / sum_core_species
             self.kf[j] = rxn.get_rate_coefficient(self.T.value_si, Peff)
 
             if rxn.reversible:

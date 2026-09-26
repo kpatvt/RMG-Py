@@ -529,8 +529,11 @@ cdef class ReactionSystem(DASx):
         """
 
         cdef np.ndarray[np.int_t, ndim=1] surf_species_indices
-        cdef int i, j, k, index, num_core_species, num_core_reactions, num_edge_reactions
+        cdef np.ndarray[np.int_t, ndim=2] product_indices, reactant_indices
+        cdef int i, j, k, index, row, num_core_species, num_core_reactions, num_edge_reactions
         cdef list valid_indices
+        cdef set surface_indices
+        cdef bint valid
 
         surf_species_indices = self.surface_species_indices
         num_core_species = self.num_core_species
@@ -538,20 +541,30 @@ cdef class ReactionSystem(DASx):
         num_edge_reactions = self.num_edge_reactions
         product_indices = self.product_indices
         reactant_indices = self.reactant_indices
+        surface_indices = set(surf_species_indices.tolist())
 
         valid_indices = []
 
         for index in range(num_edge_reactions):
-            for j in product_indices[index + num_core_reactions]:
-                if j in surf_species_indices or j >= num_core_species:
+            row = index + num_core_reactions
+            # Valid if all products are bulk core species (or placeholders)...
+            valid = True
+            for k in range(product_indices.shape[1]):
+                j = product_indices[row, k]
+                if j in surface_indices or j >= num_core_species:
+                    valid = False
                     break
-            else:
+            if valid:
                 valid_indices.append(index)
                 continue
-            for j in reactant_indices[index + num_core_reactions]:
-                if j in surf_species_indices or j >= num_core_species:
+            # ... or all reactants are
+            valid = True
+            for k in range(reactant_indices.shape[1]):
+                j = reactant_indices[row, k]
+                if j in surface_indices or j >= num_core_species:
+                    valid = False
                     break
-            else:
+            if valid:
                 valid_indices.append(index)
 
         return np.array(valid_indices)
@@ -616,6 +629,9 @@ cdef class ReactionSystem(DASx):
         cdef np.ndarray[np.float64_t, ndim=1] core_species_rates, edge_species_rates, network_leak_rates
         cdef np.ndarray[np.float64_t, ndim=1] core_species_production_rates, core_species_consumption_rates, total_div_accum_nums
         cdef np.ndarray[np.float64_t, ndim=1] max_edge_species_rate_ratios, max_network_leak_rate_ratios
+        # Typed so that the per-step loops over the edge species index them in C
+        cdef np.ndarray[np.float64_t, ndim=1] edge_species_rate_ratios, network_leak_rate_ratios
+        cdef np.ndarray[np.int_t, ndim=1] prunable_species_indices, prunable_network_indices
         cdef bint terminated
         cdef object max_species, max_network
         cdef int i, j, k
@@ -856,10 +872,12 @@ cdef class ReactionSystem(DASx):
 
             # Update the maximum species rate and maximum network leak rate arrays
             # (the index is -1 for prunable species and networks that are no longer in the edge)
-            for i, index in enumerate(prunable_species_indices):
+            for i in range(prunable_species_indices.shape[0]):
+                index = prunable_species_indices[i]
                 if index >= 0 and max_edge_species_rate_ratios[i] < edge_species_rate_ratios[index]:
                     max_edge_species_rate_ratios[i] = edge_species_rate_ratios[index]
-            for i, index in enumerate(prunable_network_indices):
+            for i in range(prunable_network_indices.shape[0]):
+                index = prunable_network_indices[i]
                 if index >= 0 and max_network_leak_rate_ratios[i] < network_leak_rate_ratios[index]:
                     max_network_leak_rate_ratios[i] = network_leak_rate_ratios[index]
 
