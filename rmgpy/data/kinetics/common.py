@@ -223,6 +223,31 @@ def ensure_independent_atom_ids(input_species, resonance=True):
         for species in input_species:
             species.generate_resonance_structures(keep_isomorphic=True)
 
+def _independent_copy(reactant):
+    """
+    Return a copy of the `reactant` (a :class:`Species` or :class:`Molecule`) whose molecules can be
+    manipulated independently of those of `reactant`, for reacting a species with itself.
+
+    Unlike ``Species.copy(deep=True)``, this does not copy the thermo, conformer, transport and
+    energy transfer data (which are shared with `reactant`): only the molecules of the copy are
+    used when generating reactions, and copying the data is expensive.
+    """
+    if not isinstance(reactant, Species):
+        return reactant.copy(deep=True)
+    other = Species.__new__(Species)
+    other.index = reactant.index
+    other.label = reactant.label
+    other.thermo = reactant.thermo
+    other.molecule = [molecule.copy(deep=True) for molecule in reactant.molecule]
+    other.conformer = reactant.conformer
+    other.transport_data = reactant.transport_data
+    other.molecular_weight = reactant.molecular_weight
+    other.energy_transfer_model = reactant.energy_transfer_model
+    other.reactive = reactant.reactive
+    other.props = dict(reactant.props)
+    return other
+
+
 def check_for_same_reactants(reactants):
     """
     Given a list reactants, check if the reactants are the same.
@@ -235,7 +260,7 @@ def check_for_same_reactants(reactants):
     same_reactants = 0
     if len(reactants) == 2:
         if reactants[0] is reactants[1]:
-            reactants[1] = reactants[1].copy(deep=True)
+            reactants[1] = _independent_copy(reactants[1])
             same_reactants = 2
         elif reactants[0].is_isomorphic(reactants[1]):
             same_reactants = 2
@@ -244,17 +269,17 @@ def check_for_same_reactants(reactants):
         same_02 = reactants[0] is reactants[2]
         if same_01 and same_02:
             same_reactants = 3
-            reactants[1] = reactants[1].copy(deep=True)
-            reactants[2] = reactants[2].copy(deep=True)
+            reactants[1] = _independent_copy(reactants[1])
+            reactants[2] = _independent_copy(reactants[2])
         elif same_01:
             same_reactants = 2
-            reactants[1] = reactants[1].copy(deep=True)
+            reactants[1] = _independent_copy(reactants[1])
         elif same_02:
             same_reactants = 2
-            reactants[2] = reactants[2].copy(deep=True)
+            reactants[2] = _independent_copy(reactants[2])
         elif reactants[1] is reactants[2]:
             same_reactants = 2
-            reactants[2] = reactants[2].copy(deep=True)
+            reactants[2] = _independent_copy(reactants[2])
         else:
             same_01 = reactants[0].is_isomorphic(reactants[1])
             same_02 = reactants[0].is_isomorphic(reactants[2])

@@ -70,6 +70,76 @@ from rmgpy.molecule.fragment import Fragment
 import rmgpy.constants as constants
 from rmgpy.data.solvation import SoluteData, add_solute_data, SoluteTSData, to_soluteTSdata
 
+class _AutomorphismCache(object):
+    """
+    Answers to whether an automorphism of a molecule maps given atoms onto given atoms, for
+    :meth:`KineticsFamily._symmetry_classes`. The same questions recur for the template matches of
+    many families and whenever a species reacts again. The answers are kept while the structure of
+    the molecule (atoms, electrons and bonds) is unchanged, for a limited number of molecules (keeping
+    many molecules alive slows down garbage collection).
+    """
+
+    __slots__ = ('molecule', 'stamp', 'copy', 'to_copy', 'results')
+
+    def __init__(self, molecule, stamp):
+        self.molecule = molecule
+        self.stamp = stamp
+        self.copy = None
+        self.to_copy = None
+        self.results = {}
+
+    def release_copy(self):
+        """
+        Release the copy of the molecule used for the isomorphism checks.
+        """
+        self.copy = None
+        self.to_copy = None
+
+    def related(self, molecule, pairs):
+        """
+        Return ``True`` if an automorphism of `molecule` maps the first atom of each of the atom
+        `pairs` onto the second.
+        """
+        key = frozenset([(id(atom1), id(atom2)) for atom1, atom2 in pairs])
+        result = self.results.get(key)
+        if result is None:
+            if self.copy is None:
+                # Isomorphism checks need two distinct graphs
+                self.copy = molecule.copy(deep=True)
+                self.to_copy = dict(zip(molecule.atoms, self.copy.atoms))
+            to_copy = self.to_copy
+            initial_map = {atom1: to_copy[atom2] for atom1, atom2 in pairs}
+            result = self.results[key] = molecule.is_isomorphic(self.copy, initial_map=initial_map)
+        return result
+
+
+_automorphism_caches = {}
+_AUTOMORPHISM_CACHE_SIZE = 500
+
+
+def _molecule_stamp(molecule):
+    """
+    Return a description of the structure of `molecule` that changes if an atom, its electrons or
+    its bonds change.
+    """
+    return tuple([(id(atom), atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
+                   atom.lone_pairs, tuple([(id(neighbor), bond.order) for neighbor, bond in atom.edges.items()]))
+                  for atom in molecule.atoms])
+
+
+def _get_automorphism_cache(molecule):
+    """
+    Return the :class:`_AutomorphismCache` of `molecule`.
+    """
+    stamp = _molecule_stamp(molecule)
+    cache = _automorphism_caches.get(id(molecule))
+    if cache is None or cache.molecule is not molecule or cache.stamp != stamp:
+        if len(_automorphism_caches) >= _AUTOMORPHISM_CACHE_SIZE:
+            _automorphism_caches.clear()
+        cache = _automorphism_caches[id(molecule)] = _AutomorphismCache(molecule, stamp)
+    return cache
+
+
 # Whether reactions related to earlier ones by a symmetry of the reactants are generated as shadow
 # reactions (see ShadowReaction) where the caller allows it. This does not change the results.
 SYMMETRY_COMPRESSION = True
@@ -1812,6 +1882,30 @@ class KineticsFamily(Database):
 
         return reaction
 
+    def _template_contains_surface_site(self, group):
+        """
+        Return ``group.contains_surface_site()`` for a template group, cached while `group` is the
+        same object with the same atoms and atom types.
+        """
+        cache = self.__dict__.setdefault('_template_surface_sites', {})
+        atom_ids = [(id(atom), tuple([id(atomtype) for atomtype in atom.atomtype])) for atom in group.atoms]
+        cached = cache.get(id(group))
+        if cached is not None and cached[0] is group and cached[1] == atom_ids:
+            return cached[2]
+        result = group.contains_surface_site()
+        cache[id(group)] = (group, atom_ids, result)
+        return result
+
+    def _is_surface_family(self):
+        """
+        Return ``True`` if the label of the family marks it as a surface family.
+        """
+        label = self.label
+        cached = self.__dict__.get('_surface_family')
+        if cached is None or cached[0] != label:
+            cached = self.__dict__['_surface_family'] = (label, 'surface' in label.lower())
+        return cached[1]
+
     def _get_split_template_reactants(self, group, forward):
         """
         Return the unconnected parts of the template reactant `group` as separate groups.
@@ -1847,7 +1941,7 @@ class KineticsFamily(Database):
         if isinstance(struct, LogicNode):
             mappings = []
             for child_structure in struct.get_possible_structures(self.groups.entries):
-                if child_structure.contains_surface_site() != reactant_contains_surface_site:
+                if self._template_contains_surface_site(child_structure) != reactant_contains_surface_site:
                     # An adsorbed template can't match a gas-phase species and vice versa
                     continue
                 mappings.extend(reactant.find_subgraph_isomorphisms(child_structure, save_order=self.save_order))
@@ -1856,7 +1950,7 @@ class KineticsFamily(Database):
             if struct.is_surface_site() != reactant_is_surface_site:
                 # An empty surface site group should not match an adsorbate
                 return []
-            if struct.contains_surface_site() != reactant_contains_surface_site:
+            if self._template_contains_surface_site(struct) != reactant_contains_surface_site:
                 # An adsorbed template can't match a gas-phase species and vice versa
                 return []
             return reactant.find_subgraph_isomorphisms(struct, save_order=self.save_order)
@@ -2109,7 +2203,7 @@ class KineticsFamily(Database):
         if len(reactants) > len(template.reactants):
             # If the template contains a surface site, we do not want to split it because it will break vdw bonds
             if isinstance(template.reactants[0].item, Group):
-                if template.reactants[0].item.contains_surface_site():
+                if self._template_contains_surface_site(template.reactants[0].item):
                     return []
             # if the family has one template and is bimolecular split template into multiple reactants
             try:
@@ -2122,7 +2216,7 @@ class KineticsFamily(Database):
         # Whether reactions related to earlier ones by a symmetry of a reactant are generated as
         # shadow reactions (see ShadowReaction), which requires the labels to be deleted afterwards
         compress = (compress_symmetric and SYMMETRY_COMPRESSION and delete_labels
-                    and 'surface' not in self.label.lower()
+                    and not self._is_surface_family()
                     and all(type(molecule) is Molecule and not molecule.contains_surface_site()
                             for molecules in reactants for molecule in molecules))
 
@@ -2567,34 +2661,40 @@ class KineticsFamily(Database):
         classes = list(range(count))
         if count < 2:
             return classes
-        # Automorphism-invariant descriptions of the atoms, to avoid most isomorphism checks
+        # Automorphism-invariant descriptions of the matched atoms, to avoid most isomorphism checks
         invariants = {}
-        for atom in molecule.atoms:
-            invariants[atom] = (atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
-                                atom.lone_pairs, tuple(sorted([(neighbor.element.symbol, neighbor.radical_electrons,
-                                                                neighbor.charge, bond.order)
-                                                               for neighbor, bond in atom.edges.items()])))
         inverses = []
         buckets = {}
-        copy = None
-        to_copy = None
+        automorphisms = None
         for index, mapping in enumerate(mappings):
             inverse = {group_atom: atom for atom, group_atom in mapping.items()}
             inverses.append(inverse)
             group_atoms = sorted(inverse, key=id)
-            signature = tuple([(id(group_atom), invariants[inverse[group_atom]]) for group_atom in group_atoms])
+            signature = []
+            for group_atom in group_atoms:
+                atom = inverse[group_atom]
+                invariant = invariants.get(atom)
+                if invariant is None:
+                    invariant = invariants[atom] = (
+                        atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
+                        atom.lone_pairs, tuple(sorted([(neighbor.element.symbol, neighbor.radical_electrons,
+                                                        neighbor.charge, bond.order)
+                                                       for neighbor, bond in atom.edges.items()])))
+                signature.append((id(group_atom), invariant))
+            signature = tuple(signature)
             for other in buckets.get(signature, ()):
-                if copy is None:
-                    # Isomorphism checks need two distinct graphs
-                    copy = molecule.copy(deep=True)
-                    to_copy = dict(zip(molecule.atoms, copy.atoms))
                 other_inverse = inverses[other]
-                initial_map = {other_inverse[group_atom]: to_copy[inverse[group_atom]] for group_atom in group_atoms}
-                if molecule.is_isomorphic(copy, initial_map=initial_map):
+                if automorphisms is None:
+                    automorphisms = _get_automorphism_cache(molecule)
+                if automorphisms.related(molecule, [(other_inverse[group_atom], inverse[group_atom])
+                                                    for group_atom in group_atoms]):
                     classes[index] = other
                     break
             else:
                 buckets.setdefault(signature, []).append(index)
+        if automorphisms is not None:
+            # Only keep the answers, as keeping many molecule graphs alive slows down garbage collection
+            automorphisms.release_copy()
         return classes
 
     @staticmethod
