@@ -420,6 +420,7 @@ class TestSpecies:
         """
         Test that a Cantera Species object is created correctly.
         """
+        from rmgpy.thermo import NASA, NASAPolynomial
         import cantera as ct
 
         rmg_species = Species(
