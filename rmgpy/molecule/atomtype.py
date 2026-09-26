@@ -943,23 +943,26 @@ def get_atomtype(atom, bonds):
     # combinations, so the result is cached instead of testing every specific atom type again
     key = (atom_symbol, tuple(mol_feature_list))
     specific_atom_type = _atomtype_cache.get(key)
-    if specific_atom_type is not None:
+    if specific_atom_type is None:
+        for specific_atom_type in ATOMTYPES[atom_symbol].specific:
+            atomtype_feature_list = specific_atom_type.get_features()
+            for mol_feature, atomtype_feature in zip(mol_feature_list, atomtype_feature_list):
+                if atomtype_feature == []:
+                    continue
+                elif mol_feature not in atomtype_feature:
+                    break
+            else:
+                _atomtype_cache[key] = specific_atom_type
+                return specific_atom_type
+        # No atom type matches; this is cached too, since resonance structure generation tries
+        # many candidates with undefined atom types
+        _atomtype_cache[key] = False
+    elif specific_atom_type is not False:
         return specific_atom_type
-    for specific_atom_type in ATOMTYPES[atom_symbol].specific:
-        atomtype_feature_list = specific_atom_type.get_features()
-        for mol_feature, atomtype_feature in zip(mol_feature_list, atomtype_feature_list):
-            if atomtype_feature == []:
-                continue
-            elif mol_feature not in atomtype_feature:
-                break
-        else:
-            _atomtype_cache[key] = specific_atom_type
-            return specific_atom_type
-    else:
-        single, all_double, r_double, o_double, s_double, triple, quadruple, benzene, lone_pairs, charge = mol_feature_list
 
-        raise AtomTypeError(
-            f'Unable to determine atom type for atom {atom}, which has {single:d} single bonds, '
-            f'{all_double:d} double bonds ({o_double:d} to O, {s_double:d} to S, '
-            f'{r_double:d} others), {triple:d} triple bonds, {quadruple:d} quadruple bonds, '
-            f'{benzene:d} benzene bonds, {lone_pairs:d} lone pairs, and {charge:+d} charge.')
+    single, all_double, r_double, o_double, s_double, triple, quadruple, benzene, lone_pairs, charge = mol_feature_list
+    raise AtomTypeError(
+        f'Unable to determine atom type for atom {atom}, which has {single:d} single bonds, '
+        f'{all_double:d} double bonds ({o_double:d} to O, {s_double:d} to S, '
+        f'{r_double:d} others), {triple:d} triple bonds, {quadruple:d} quadruple bonds, '
+        f'{benzene:d} benzene bonds, {lone_pairs:d} lone pairs, and {charge:+d} charge.')
