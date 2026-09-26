@@ -174,3 +174,36 @@ def test_identity_key_matches_identity_check():
                 identical = rxn1.is_isomorphic(rxn2, check_identical=True, strict=False,
                                                check_template_rxn_products=True)
                 assert (key1 == key2) == identical, (str(rxn1), str(rxn2))
+
+
+def test_product_connectivity_filter():
+    """The product pre-check must never reject a mapping whose products match, and should reject others"""
+    from rmgpy.data.kinetics.family import _ProductConnectivityFilter
+    from rmgpy.reaction import same_species_lists
+
+    family = database.kinetics.families["H_Abstraction"]
+    for smiles1, smiles2 in [("CCC", "[OH]"), ("CC(C)C", "[O]O"), ("C=CC", "[CH3]")]:
+        reactants = [Species().from_smiles(smiles1), Species().from_smiles(smiles2)]
+        ensure_independent_atom_ids(reactants)
+        molecules = [reactants[0].molecule[0], reactants[1].molecule[0]]
+        reactions = family.generate_reactions(molecules)
+        assert len(reactions) > 1
+        # Use the products of each reaction in turn as the requested products
+        for target in reactions:
+            products = [p.copy(deep=True) for p in target.products]
+            product_filter = _ProductConnectivityFilter(family.forward_recipe, products)
+            template = family.forward_template.reactants
+            rejected = 0
+            for map_a in family._match_reactant_to_template(molecules[0], template[0].item):
+                for map_b in family._match_reactant_to_template(molecules[1], template[1].item):
+                    for structures, maps in (([molecules[0], molecules[1]], [map_a, map_b]),):
+                        may_match = product_filter.may_match(structures, maps)
+                        try:
+                            generated = family._generate_product_structures(structures, maps, True)
+                        except Exception:
+                            generated = None
+                        if generated is not None and same_species_lists(products, generated, strict=False):
+                            assert may_match
+                        if not may_match:
+                            rejected += 1
+            assert rejected > 0

@@ -138,6 +138,136 @@ def _get_automorphism_cache(molecule):
     return cache
 
 
+class _ProductConnectivityFilter(object):
+    """
+    A quick check whether the products that a template mapping generates can match the requested
+    `products` of :meth:`KineticsFamily._generate_reactions`, which compares them with
+    ``strict=False``, i.e. by their elements and which atoms are bonded (ignoring bond orders and
+    electrons).
+
+    The bonds formed and broken by the recipe are known from the atom labels, so the connectivity
+    of the products (the connected components of the reactants' bond graph after these changes)
+    can be computed without generating the products. It is compared with that of the requested
+    products using Weisfeiler-Lehman color refinement, which gives equal results for isomorphic
+    graphs. So a mapping is only rejected if its products certainly cannot match; otherwise the
+    products are generated and checked as usual.
+    """
+
+    ROUNDS = 2
+
+    def __init__(self, recipe, products):
+        self.colors = {}
+        self.graphs = {}
+        self.bond_changes = []
+        for action in recipe.actions:
+            if action[0] == 'FORM_BOND':
+                self.bond_changes.append((True, action[1], action[3]))
+            elif action[0] == 'BREAK_BOND':
+                self.bond_changes.append((False, action[1], action[3]))
+        self.target = None
+        invariants = []
+        for product in products:
+            molecule = product.molecule[0] if isinstance(product, Species) else product
+            if type(molecule) is not Molecule:
+                return
+            index, elements, neighbors = self._graph([molecule])
+            invariants.extend(self._component_invariants(elements, neighbors))
+        self.target = sorted(invariants)
+
+    def _graph(self, molecules):
+        """
+        Return a dict of the index of each atom of `molecules`, the list of the element colors of
+        the atoms, and the list of the (indices of the) bonded atoms of each atom.
+        """
+        atoms = [atom for molecule in molecules for atom in molecule.atoms]
+        index = {atom: i for i, atom in enumerate(atoms)}
+        colors = self.colors
+        elements = [colors.setdefault((atom.element.symbol, atom.element.isotope), len(colors)) for atom in atoms]
+        neighbors = [[index[neighbor] for neighbor in atom.edges] for atom in atoms]
+        return index, elements, neighbors
+
+    def _component_invariants(self, elements, neighbors):
+        """
+        Return the invariants of the connected components of the graph with the given element
+        colors and lists of bonded atoms.
+        """
+        colors = self.colors
+        color = elements
+        for _ in range(self.ROUNDS):
+            color = [colors.setdefault((color[i], tuple(sorted([color[j] for j in bonded]))), len(colors))
+                     for i, bonded in enumerate(neighbors)]
+        invariants = []
+        count = len(neighbors)
+        visited = [False] * count
+        for start in range(count):
+            if visited[start]:
+                continue
+            visited[start] = True
+            stack = [start]
+            component = [color[start]]
+            while stack:
+                i = stack.pop()
+                for j in neighbors[i]:
+                    if not visited[j]:
+                        visited[j] = True
+                        stack.append(j)
+                        component.append(color[j])
+            component.sort()
+            invariants.append(tuple(component))
+        return invariants
+
+    def may_match(self, reactant_structures, maps):
+        """
+        Return ``False`` if the products generated from `reactant_structures` with the template
+        `maps` certainly do not match the requested products, else ``True``.
+        """
+        if self.target is None:
+            return True
+        key = tuple([id(struct) for struct in reactant_structures])
+        graph = self.graphs.get(key)
+        if graph is None:
+            graph = self.graphs[key] = (reactant_structures, self._graph(reactant_structures))
+        index, elements, neighbors = graph[1]
+        labeled = {}
+        for mapping in maps:
+            for atom, group_atom in mapping.items():
+                if group_atom.label:
+                    labeled.setdefault(group_atom.label, []).append(atom)
+        changed = {}
+        for form, label1, label2 in self.bond_changes:
+            atoms1 = labeled.get(label1)
+            atoms2 = labeled.get(label2)
+            if label1 == label2:
+                if atoms1 is None or len(atoms1) != 2:
+                    return True
+                atom1, atom2 = atoms1
+            else:
+                if atoms1 is None or atoms2 is None or len(atoms1) != 1 or len(atoms2) != 1:
+                    return True
+                atom1, atom2 = atoms1[0], atoms2[0]
+            i, j = index.get(atom1), index.get(atom2)
+            if i is None or j is None or i == j:
+                return True
+            if i not in changed:
+                changed[i] = list(neighbors[i])
+            if j not in changed:
+                changed[j] = list(neighbors[j])
+            if (j in changed[i]) == form:
+                # The recipe cannot be applied; leave this to the usual checks
+                return True
+            if form:
+                changed[i].append(j)
+                changed[j].append(i)
+            else:
+                changed[i].remove(j)
+                changed[j].remove(i)
+        if changed:
+            neighbors = list(neighbors)
+            for i, bonded in changed.items():
+                neighbors[i] = bonded
+        return sorted(self._component_invariants(elements, neighbors)) == self.target
+
+
 # Whether reactions related to earlier ones by a symmetry of the reactants are generated as shadow
 # reactions (see ShadowReaction) where the caller allows it. This does not change the results.
 SYMMETRY_COMPRESSION = True
@@ -2217,6 +2347,12 @@ class KineticsFamily(Database):
                     and not self._is_surface_family()
                     and all(type(molecule) is Molecule and not molecule.contains_surface_site()
                             for molecules in reactants for molecule in molecules))
+        # If only reactions giving the given products are wanted, mappings whose products certainly
+        # do not match them are not generated
+        product_filter = None
+        if compress and products is not None:
+            product_filter = _ProductConnectivityFilter(self.forward_recipe if forward else self.reverse_recipe,
+                                                        products)
 
         # Unimolecular reactants: A --> products
         if len(reactants) == 1 and len(template_reactants) == 1:
@@ -2245,6 +2381,9 @@ class KineticsFamily(Database):
                                 rxn_list.append(shadow)
                                 continue
                             skipped = None
+                        if product_filter is not None and not product_filter.may_match(reactant_structures, [mapping]):
+                            skipped = (reactant_structures, [mapping])
+                            continue
                         try:
                             product_structures = self._generate_product_structures(reactant_structures,
                                                                                    [mapping],
@@ -2310,6 +2449,10 @@ class KineticsFamily(Database):
                                             rxn_list.append(shadow)
                                             continue
                                         skipped = None
+                                if product_filter is not None and not product_filter.may_match(reactant_structures,
+                                                                                               [map_b, map_a]):
+                                    skipped = (reactant_structures, [map_b, map_a])
+                                    continue
                                 try:
                                     product_structures = self._generate_product_structures(reactant_structures,
                                                                                            [map_b, map_a],
@@ -2359,6 +2502,10 @@ class KineticsFamily(Database):
                                                 rxn_list.append(shadow)
                                                 continue
                                             skipped = None
+                                    if product_filter is not None and not product_filter.may_match(
+                                            reactant_structures, [map_a, map_b]):
+                                        skipped = (reactant_structures, [map_a, map_b])
+                                        continue
                                     try:
                                         product_structures = self._generate_product_structures(reactant_structures,
                                                                                                [map_a, map_b],
