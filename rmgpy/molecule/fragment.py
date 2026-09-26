@@ -27,6 +27,7 @@
 #                                                                             #
 ###############################################################################
 
+import re
 import itertools
 import logging
 
@@ -43,6 +44,21 @@ from rdkit import Chem
 # this variable is used to name atom IDs so that there are as few conflicts by
 # using the entire space of integer objects
 ATOM_ID_COUNTER = -(2**15)
+
+
+# Pattern of possible cutting labels in a SMILES string or atom type, see Fragment.detect_cutting_label
+_CUTTING_LABEL_PATTERN = re.compile(r"(\w?[LR][^:()]?)")
+
+_ELEMENT_SYMBOLS = None
+
+
+def _get_element_symbols():
+    """Return the set of the symbols of all elements (and isotopes) in rmgpy.molecule.element."""
+    global _ELEMENT_SYMBOLS
+    if _ELEMENT_SYMBOLS is None:
+        from rmgpy.molecule.element import element_list
+        _ELEMENT_SYMBOLS = frozenset(element.symbol for element in element_list[1:])
+    return _ELEMENT_SYMBOLS
 
 
 class CuttingLabel(Atom):
@@ -1308,18 +1324,15 @@ class Fragment(Molecule):
     
     @staticmethod
     def detect_cutting_label(smiles):
-        import re
-        from rmgpy.molecule.element import element_list
-
-        # store elements' symbol
-        all_element_list = []
-        for element in element_list[1:]:
-            all_element_list.append(element.symbol)
+        # store elements' symbol (only used for membership tests; built once, since this is called
+        # for every atom when parsing adjacency lists)
+        all_element_list = _get_element_symbols()
 
         # store the tuple of matched indexes, however,
         # the index might contain redundant elements such as C, Ra, (), Li, ...
-        index_indicator = [x.span() for x in re.finditer(r"(\w?[LR][^:()]?)", smiles)]
-        possible_cutting_label_list = re.findall(r"(\w?[LR][^:()]?)", smiles)
+        matches = list(_CUTTING_LABEL_PATTERN.finditer(smiles))
+        index_indicator = [x.span() for x in matches]
+        possible_cutting_label_list = [x.group(1) for x in matches]
 
         cutting_label_list = []
         ind_ranger = []

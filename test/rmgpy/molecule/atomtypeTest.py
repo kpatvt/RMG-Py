@@ -1037,3 +1037,23 @@ class TestGetAtomType:
         Test that get_atomtype() returns the proton (H+) atom type.
         """
         assert self.atom_type(self.proton, 0) == 'H+'
+
+
+class TestAtomTypeFailureCache:
+    """Failing atom type lookups are cached, and raise the same error every time"""
+
+    def test_undefined_atomtype_raises_repeatedly(self):
+        from rmgpy.exceptions import AtomTypeError
+        from rmgpy.molecule import Molecule
+        from rmgpy.molecule.atomtype import get_atomtype
+        molecule = Molecule().from_smiles("C")
+        carbon = [atom for atom in molecule.atoms if atom.is_carbon()][0]
+        carbon.lone_pairs = 3  # no carbon atom type has 3 lone pairs and 4 single bonds
+        messages = []
+        for _ in range(2):
+            with pytest.raises(AtomTypeError) as error:
+                get_atomtype(carbon, carbon.edges)
+            messages.append(str(error.value))
+        assert messages[0] == messages[1]
+        carbon.lone_pairs = 0
+        assert get_atomtype(carbon, carbon.edges).label == 'Cs'

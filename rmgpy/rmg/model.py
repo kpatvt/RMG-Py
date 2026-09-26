@@ -911,6 +911,11 @@ class CoreEdgeReactionModel:
 
         Makes a reaction and decides where to put it: core, edge, or PDepNetwork.
         """
+        # Species compare by identity, so membership of the (possibly long) core and edge
+        # species lists is tracked with sets of ids. Within this method, species are only
+        # added to the edge, via add_species_to_edge below.
+        core_species_ids = {id(spec) for spec in self.core.species}
+        edge_species_ids = {id(spec) for spec in self.edge.species}
         for rxn in new_reactions:
             try:
                 rxn, is_new = self.make_new_reaction(rxn, generate_thermo=generate_thermo, generate_kinetics=generate_kinetics)
@@ -926,16 +931,12 @@ class CoreEdgeReactionModel:
                 all_species_in_core = True
                 # Add the reactant and product species to the edge if necessary
                 # At the same time, check if all reactants and products are in the core
-                for spec in rxn.reactants:
-                    if spec not in self.core.species:
+                for spec in itertools.chain(rxn.reactants, rxn.products):
+                    if id(spec) not in core_species_ids:
                         all_species_in_core = False
-                        if spec not in self.edge.species:
+                        if id(spec) not in edge_species_ids:
                             self.add_species_to_edge(spec, requires_rms=requires_rms)
-                for spec in rxn.products:
-                    if spec not in self.core.species:
-                        all_species_in_core = False
-                        if spec not in self.edge.species:
-                            self.add_species_to_edge(spec, requires_rms=requires_rms)
+                            edge_species_ids.add(id(spec))
 
             isomer_atoms = sum([len(spec.molecule[0].atoms) for spec in rxn.reactants])
 
@@ -1245,16 +1246,12 @@ class CoreEdgeReactionModel:
             self.edge.species.remove(spec)
 
             # Search edge for reactions that now contain only core species;
-            # these belong in the model core and will be moved there
+            # these belong in the model core and will be moved there.
+            # Species compare by identity, so core membership is checked with a set of ids.
+            core_species_ids = {id(s) for s in self.core.species}
             for rxn in self.edge.reactions:
-                all_core = True
-                for reactant in rxn.reactants:
-                    if reactant not in self.core.species:
-                        all_core = False
-                for product in rxn.products:
-                    if product not in self.core.species:
-                        all_core = False
-                if all_core:
+                if (all(id(reactant) in core_species_ids for reactant in rxn.reactants)
+                        and all(id(product) in core_species_ids for product in rxn.products)):
                     rxn_list.append(rxn)
 
             # Move any identified reactions to the core
@@ -1552,22 +1549,25 @@ class CoreEdgeReactionModel:
                 # Recompute the isomers, reactants, and products for this network
                 network.update_configurations(self)
 
-        # Remove from the global list of reactions
-        # also remove it from the global list of reactions
+        # Remove its reactions from the global list of reactions, and remove the short-lists (and
+        # reactant entries) that are left empty, so that they do not accumulate. The keys are species
+        # labels, which are not necessarily unique, so entries are only removed once they are empty
+        # (retrieve() returns an empty list for missing entries, so lookups are unaffected).
         for family in self.reaction_dict:
-            if spec in self.reaction_dict[family]:
-                del self.reaction_dict[family][spec]
-            for reactant1 in self.reaction_dict[family]:
-                if spec in self.reaction_dict[family][reactant1]:
-                    del self.reaction_dict[family][reactant1][spec]
-            for reactant1 in self.reaction_dict[family]:
-                for reactant2 in self.reaction_dict[family][reactant1]:
+            family_dict = self.reaction_dict[family]
+            for reactant1 in list(family_dict):
+                reactant1_dict = family_dict[reactant1]
+                for reactant2 in list(reactant1_dict):
                     temp_rxn_delete_list = []
-                    for templateReaction in self.reaction_dict[family][reactant1][reactant2]:
+                    for templateReaction in reactant1_dict[reactant2]:
                         if spec in templateReaction.reactants or spec in templateReaction.products:
                             temp_rxn_delete_list.append(templateReaction)
                     for tempRxnToBeDeleted in temp_rxn_delete_list:
-                        self.reaction_dict[family][reactant1][reactant2].remove(tempRxnToBeDeleted)
+                        reactant1_dict[reactant2].remove(tempRxnToBeDeleted)
+                    if temp_rxn_delete_list and not reactant1_dict[reactant2]:
+                        del reactant1_dict[reactant2]
+                if not reactant1_dict:
+                    del family_dict[reactant1]
 
         # remove from the global list of species, to free memory
         formula = spec.molecule[0].get_formula()

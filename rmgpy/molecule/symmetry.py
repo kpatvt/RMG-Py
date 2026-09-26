@@ -522,11 +522,18 @@ def _indistinguishable(atom1, atom2):
             or atom1.connectivity3 != atom2.connectivity3):
         return False
 
-    bond_orders_1 = [bond.order for bond in atom1.bonds.values()].sort()
-    bond_orders_2 = [bond.order for bond in atom2.bonds.values()].sort()
+    # Compare the sorted bond orders, with the same tolerance as Bond.is_order(), because the bond
+    # orders of resonance hybrids are averages that can differ by floating point error
+    bond_orders_1 = [bond.order for bond in atom1.bonds.values()]
+    bond_orders_1.sort()
+    bond_orders_2 = [bond.order for bond in atom2.bonds.values()]
+    bond_orders_2.sort()
 
-    if bond_orders_1 != bond_orders_2:
+    if len(bond_orders_1) != len(bond_orders_2):
         return False
+    for i in range(len(bond_orders_1)):
+        if abs(bond_orders_1[i] - bond_orders_2[i]) > 1e-4:
+            return False
 
     bonds_1 = list(atom1.bonds.items())
     bonds_2 = list(atom2.bonds.items())

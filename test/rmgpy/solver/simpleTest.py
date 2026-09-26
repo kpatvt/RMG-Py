@@ -624,6 +624,85 @@ class SimpleReactorTest:
         for i in range(len(simulated_mole_fracs)):
             assert round(abs(simulated_mole_fracs[i] - expected_mole_fracs[i]), 7) == 0
 
+    def test_jacobian_repeated_reactants(self):
+        """
+        Test the analytical Jacobian against finite differences of the residual for reactions with one, two and
+        three reactants and products, with every pattern of repeated species. For three species (a, b, c), the
+        case a == c != b was once treated as three identical species when the bits of a were a subset of those
+        of b, e.g. for the species indices (1, 3, 1) and (2, 3, 2).
+        """
+        folder = os.path.join(os.path.dirname(rmgpy.__file__), "solver", "files", "collider_model")
+        species_list = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                         os.path.join(folder, "species_dictionary.txt"))[0][:6]
+        units = {1: "s^-1", 2: "cm^3/(mol*s)", 3: "cm^6/(mol^2*s)"}
+        patterns = [(0,), (0, 1), (1, 1), (0, 1, 2), (0, 0, 0), (0, 0, 1), (0, 1, 1), (1, 0, 1), (1, 3, 1),
+                    (2, 3, 2), (3, 1, 1), (1, 1, 3), (3, 1, 3), (5, 4, 5)]
+        for pattern in patterns:
+            for reactants, products in ((pattern, (4,)), (pattern, (4, 5)), ((4,), pattern), ((4, 5), pattern)):
+                reaction = Reaction(reactants=[species_list[i] for i in reactants],
+                                    products=[species_list[i] for i in products],
+                                    kinetics=Arrhenius(A=(1.0, units[len(reactants)]), n=0, Ea=(0, "kJ/mol"),
+                                                       T0=(1, "K")))
+                rxn_system = SimpleReactor(1000, 1e5, initial_mole_fractions={species_list[0]: 1.0}, n_sims=1,
+                                           termination=None)
+                rxn_system.initialize_model(species_list, [reaction], [], [])
+                # Rate coefficients that give rates of similar magnitude in both directions
+                rxn_system.kf[0] = 0.7 * 12.0 ** (1 - len(reactants))
+                rxn_system.kb[0] = 0.3 * 12.0 ** (1 - len(products))
+                n = len(species_list)
+                y = 0.2 + np.random.default_rng(0).random(n)
+                dydt = np.zeros(n)
+                jacobian = rxn_system.jacobian(0.0, y, dydt, 0.0)
+                for i in range(n):
+                    h = 1e-6 * y[i]
+                    y_plus = y.copy()
+                    y_plus[i] += h
+                    y_minus = y.copy()
+                    y_minus[i] -= h
+                    column = (rxn_system.residual(0.0, y_plus, dydt)[0]
+                              - rxn_system.residual(0.0, y_minus, dydt)[0]) / (2 * h)
+                    assert np.allclose(jacobian[:, i], column, rtol=1e-5, atol=1e-8), (reactants, products, i)
+
+    def test_pairwise_sum(self):
+        """
+        Test that pairwise_sum(), which the residual uses instead of np.sum(), rounds exactly as np.sum() does.
+        """
+        from rmgpy.solver.simple import pairwise_sum
+
+        rng = np.random.default_rng(0)
+        for n in list(range(0, 300)) + [511, 512, 513, 1000, 4099]:
+            for scale in (rng.random(n), 10.0 ** rng.integers(-30, 5, n), rng.standard_normal(n) * 1e10):
+                values = rng.random(n) * scale
+                assert pairwise_sum(values) == np.sum(values)
+
+    def test_collider_rate_coefficients(self):
+        """
+        Test that the residual sets the rate coefficients of reactions with collision efficiencies to those of
+        their kinetics at the effective pressure, also after the temperature of the reactor changes (the parts of
+        these rate coefficients that only depend on the temperature are calculated once per temperature).
+        """
+        from rmgpy.quantity import Quantity
+
+        folder = os.path.join(os.path.dirname(rmgpy.__file__), "solver", "files", "collider_model")
+        species_list, reaction_list = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                                        os.path.join(folder, "species_dictionary.txt"))
+        initial_mole_fractions = {species_list[0]: 0.3, species_list[1]: 0.2, species_list[-1]: 0.5}
+        rxn_system = SimpleReactor(1000, 1e5, initial_mole_fractions=initial_mole_fractions, n_sims=1,
+                                   termination=None)
+        rxn_system.initialize_model(species_list, reaction_list, [], [])
+        assert "Troe" in set(type(kinetics).__name__ for kinetics in rxn_system.pdep_collider_kinetics)
+
+        rng = np.random.default_rng(1)
+        for T in (1000, 1000, 1500, 800):
+            rxn_system.T = Quantity(T, "K")
+            y = rng.random(len(species_list))
+            rxn_system.residual(0.0, y, np.zeros(len(species_list)))
+            for i, j in enumerate(rxn_system.pdep_collision_reaction_indices):
+                P_eff = 1e5 * np.sum(rxn_system.collider_efficiencies[i] * y / np.sum(y))
+                k = rxn_system.pdep_collider_kinetics[i].get_rate_coefficient(T, P_eff)
+                assert rxn_system.kf[j] == k
+                assert rxn_system.kb[j] == k / rxn_system.Keq[j]
+
     def test_specific_collider_model(self):
         """
         Test the solver's ability to simulate a model with specific third body species collision efficiencies.
@@ -681,6 +760,13 @@ class SimpleReactorTest:
             termination=None,
         )
         rxn_system.initialize_model(species_list, reaction_list, [], [])
+
+        # The residual (evaluated during initialization) must update the forward and reverse rate
+        # coefficients of every reaction with a specific collider consistently
+        indices = rxn_system.pdep_specific_collider_reaction_indices
+        assert len(indices) > 1
+        for j in indices:
+            assert np.isclose(rxn_system.kb[j], rxn_system.kf[j] / rxn_system.Keq[j], rtol=1e-12, atol=0)
 
         # Advance to time = 0.1 s
         rxn_system.advance(0.1)

@@ -30,7 +30,6 @@
 import logging
 import os.path
 
-import matplotlib.pyplot as plt
 try:
     import xlwt
 except ImportError:
@@ -175,6 +174,10 @@ class ExecutionStatsWriter(object):
         """
 
         logging.info('Generating plots of execution statistics...')
+
+        # Imported here (through rmgpy.tools.plot, which selects the non-interactive Agg backend),
+        # since importing matplotlib takes a quarter of a second
+        from rmgpy.tools.plot import plt
 
         fig = plt.figure()
         ax1 = fig.add_subplot(111)

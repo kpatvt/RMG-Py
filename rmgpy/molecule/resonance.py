@@ -71,6 +71,8 @@ from rmgpy.molecule.fragment import CuttingLabel
 from rmgpy.molecule.graph import Vertex
 from rmgpy.molecule.kekulize import kekulize
 from rmgpy.molecule.molecule import Atom, Bond, Molecule
+from rmgpy.molecule.atomtype import get_atomtype
+from rmgpy.molecule.element import PeriodicSystem
 
 
 def populate_resonance_algorithms(features=None):
@@ -482,6 +484,45 @@ def generate_adj_lone_pair_radical_resonance_structures(mol):
     return structures
 
 
+def _has_undefined_atomtype(mol, atoms):
+    """
+    Return ``True`` if calling ``mol.update_atomtypes()`` would certainly fail because one of the
+    given `atoms` (whose electrons and bonds were just changed) has no defined atom type.
+
+    ``Molecule.update_atomtypes()`` first recalculates the lone pairs of every atom and then
+    determines each atom's type, which only depends on the atom's own lone pairs, charge and bonds
+    and on the elements of its neighbors. This check does the same for the given atoms only (and
+    restores their lone pairs afterwards), so resonance structure candidates that would be
+    discarded can be rejected before copying the molecule. It returns ``False`` whenever it cannot
+    be sure, e.g. for fragments, which determine their atom types differently.
+    """
+    cython.declare(atom=Atom, lone_pairs=list, i=cython.int, order=cython.double, new_lone_pairs=cython.double)
+    if type(mol) is not Molecule:
+        return False
+    lone_pairs = [atom.lone_pairs for atom in atoms]
+    try:
+        for atom in atoms:
+            # Same as Molecule.update_lone_pairs()
+            if atom.is_hydrogen() or atom.is_surface_site() or atom.is_electron() or atom.is_lithium():
+                atom.lone_pairs = 0
+            else:
+                order = atom.get_total_bond_order()
+                new_lone_pairs = (PeriodicSystem.valence_electrons[atom.element.symbol]
+                                  - atom.radical_electrons - atom.charge - int(order)) / 2.0
+                if new_lone_pairs % 1 > 0 or new_lone_pairs > 4:
+                    return False  # update_lone_pairs() would log an error for this molecule
+                atom.lone_pairs = int(new_lone_pairs)
+        for atom in atoms:
+            try:
+                get_atomtype(atom, atom.edges)
+            except AtomTypeError:
+                return True
+        return False
+    finally:
+        for i, atom in enumerate(atoms):
+            atom.lone_pairs = lone_pairs[i]
+
+
 def generate_adj_lone_pair_multiple_bond_resonance_structures(mol):
     """
     Generate all of the resonance structures formed by lone electron pair - multiple bond shifts between adjacent atoms.
@@ -506,8 +547,13 @@ def generate_adj_lone_pair_multiple_bond_resonance_structures(mol):
                 bond12.decrement_order()
             atom1.update_charge()
             atom2.update_charge()
-            # Make a copy of structure
-            structure = mol.copy(deep=True)
+            # Most candidates have an undefined atom type and would be discarded below,
+            # so check for that before making a copy
+            if _has_undefined_atomtype(mol, [atom1, atom2]):
+                structure = None
+            else:
+                # Make a copy of structure
+                structure = mol.copy(deep=True)
             # Restore current structure
             if direction == 1:  # The direction <increasing> the bond order
                 atom1.increment_lone_pairs()
@@ -517,6 +563,8 @@ def generate_adj_lone_pair_multiple_bond_resonance_structures(mol):
                 bond12.increment_order()
             atom1.update_charge()
             atom2.update_charge()
+            if structure is None:
+                continue
             try:
                 structure.update_atomtypes(log_species=False)
             except AtomTypeError:
@@ -559,8 +607,13 @@ def generate_adj_lone_pair_radical_multiple_bond_resonance_structures(mol):
                     atom2.increment_radical()
                 atom1.update_charge()
                 atom2.update_charge()
-                # Make a copy of structure
-                structure = mol.copy(deep=True)
+                # Most candidates have an undefined atom type and would be discarded below,
+                # so check for that before making a copy
+                if _has_undefined_atomtype(mol, [atom1, atom2]):
+                    structure = None
+                else:
+                    # Make a copy of structure
+                    structure = mol.copy(deep=True)
                 # Restore current structure
                 if direction == 1:  # The direction <increasing> the bond order
                     atom1.increment_lone_pairs()
@@ -574,6 +627,8 @@ def generate_adj_lone_pair_radical_multiple_bond_resonance_structures(mol):
                     atom2.decrement_radical()
                 atom1.update_charge()
                 atom2.update_charge()
+                if structure is None:
+                    continue
                 try:
                     structure.update_atomtypes(log_species=False)
                 except AtomTypeError:

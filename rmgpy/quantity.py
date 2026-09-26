@@ -188,7 +188,8 @@ class ScalarQuantity(Units):
         """
         Return a tuple of information used to pickle the scalar quantity.
         """
-        return (ScalarQuantity, (self.value, self.units, self.uncertainty, self.uncertainty_type))
+        # Store the SI values: converting them to the given units and back is not exact
+        return (_scalar_quantity_from_si, (self.units, self.value_si, self.uncertainty_type, self.uncertainty_si))
 
     def __str__(self):
         """
@@ -233,7 +234,7 @@ class ScalarQuantity(Units):
         """
         Return a copy of the quantity.
         """
-        return ScalarQuantity(self.value, self.units, self.uncertainty, self.uncertainty_type)
+        return _scalar_quantity_from_si(self.units, self.value_si, self.uncertainty_type, self.uncertainty_si)
 
     @property
     def value(self):
@@ -335,6 +336,18 @@ class ScalarQuantity(Units):
 ################################################################################
 
 
+def _scalar_quantity_from_si(units, value_si, uncertainty_type, uncertainty_si):
+    """
+    Return a :class:`ScalarQuantity` with the given `units` and the given
+    value and uncertainty in SI units (used to unpickle scalar quantities).
+    """
+    quantity = ScalarQuantity(0.0, units, 0.0, uncertainty_type)
+    quantity.value_si = value_si
+    quantity.uncertainty_si = uncertainty_si
+    return quantity
+
+################################################################################
+
 class ArrayQuantity(Units):
     """
     The :class:`ArrayQuantity` class provides a representation of an array of
@@ -383,7 +396,8 @@ class ArrayQuantity(Units):
         """
         Return a tuple of information used to pickle the array quantity.
         """
-        return (ArrayQuantity, (self.value, self.units, self.uncertainty, self.uncertainty_type))
+        # Store the SI values: converting them to the given units and back is not exact
+        return (_array_quantity_from_si, (self.units, self.value_si, self.uncertainty_type, self.uncertainty_si))
 
     def __str__(self):
         """
@@ -466,7 +480,8 @@ class ArrayQuantity(Units):
         """
         Return a copy of the quantity.
         """
-        return ArrayQuantity(self.value.copy(), self.units, self.uncertainty.copy(), self.uncertainty_type)
+        return _array_quantity_from_si(self.units, self.value_si.copy(), self.uncertainty_type,
+                                       self.uncertainty_si.copy())
 
     @property
     def value(self):
@@ -583,6 +598,16 @@ class ArrayQuantity(Units):
         return self.uncertainty_type == '*|/'
 
 
+def _array_quantity_from_si(units, value_si, uncertainty_type, uncertainty_si):
+    """
+    Return an :class:`ArrayQuantity` with the given `units` and the given
+    values and uncertainties in SI units (used to unpickle array quantities).
+    """
+    quantity = ArrayQuantity(np.array([0.0]), units, None, uncertainty_type)
+    quantity.value_si = value_si
+    quantity.uncertainty_si = uncertainty_si
+    return quantity
+
 ################################################################################
 
 def Quantity(*args, **kwargs):
@@ -619,6 +644,16 @@ def Quantity(*args, **kwargs):
 
     # Process args    
     n_args = len(args)
+    if n_args == 1 and not kwargs:
+        # Copy a quantity object via its SI values: converting them to the
+        # given units and back is not exact
+        if isinstance(args[0], ScalarQuantity):
+            other = args[0]
+            return _scalar_quantity_from_si(other.units, other.value_si, other.uncertainty_type, other.uncertainty_si)
+        elif isinstance(args[0], ArrayQuantity):
+            other = args[0]
+            return _array_quantity_from_si(other.units, np.array(other.value_si, dtype=float),
+                                           other.uncertainty_type, np.array(other.uncertainty_si, dtype=float))
     if n_args == 1 and isinstance(args[0], (ScalarQuantity, ArrayQuantity)):
         # We were given another quantity object, so make a (shallow) copy of it
         other = args[0]
