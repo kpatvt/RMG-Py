@@ -140,12 +140,15 @@ def load(cache_file):
     """
     if not os.path.isfile(cache_file):
         return None
-    # Unpickling creates millions of objects, which would trigger many (futile) garbage collections
+    # Unpickling creates millions of objects, which would trigger many (futile) garbage collections.
+    # They all belong to the database, which lives for the whole job, so they are moved to the
+    # permanent generation right away (otherwise the next full collection would traverse them all).
     gc_was_enabled = gc.isenabled()
     gc.disable()
     try:
         with open(cache_file, 'rb') as f:
             database = pickle.load(f)
+        gc.freeze()
     except Exception as e:
         logging.warning('Could not load the cached database from {0} ({1}: {2}); loading the database '
                         'from its files instead.'.format(cache_file, type(e).__name__, e))
