@@ -100,6 +100,9 @@ solvent = None
 # Maximum number of user defined processors
 maxproc = 1
 
+# Garbage collector thresholds used while executing an RMG job (see RMG.execute)
+MODEL_GENERATION_GC_THRESHOLDS = (2000, 10, 50)
+
 
 def _freeze_after_full_collection(phase, info):
     """
@@ -912,7 +915,22 @@ class RMG(util.Subject):
         by the :mod:`argparse` package.
         ``initialize`` is a ``bool`` type flag used to determine whether to call self.initialize()
         """
+        # Model generation creates and discards huge numbers of objects (e.g. molecules and
+        # reactions that turn out to be duplicates), so with the default thresholds (700, 10, 10) the
+        # garbage collector runs very often. Collecting the youngest generation less often, and
+        # promoting to the oldest generation less often, reduces the collection time by about a
+        # third without a notable effect on memory.
+        thresholds = gc.get_threshold()
+        gc.set_threshold(*MODEL_GENERATION_GC_THRESHOLDS)
+        try:
+            self._execute(initialize=initialize, **kwargs)
+        finally:
+            gc.set_threshold(*thresholds)
 
+    def _execute(self, initialize=True, **kwargs):
+        """
+        Execute an RMG job (see :meth:`execute`).
+        """
         requires_rms=False
         if initialize:
             requires_rms = self.initialize(**kwargs)

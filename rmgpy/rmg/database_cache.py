@@ -44,6 +44,7 @@ is not used for jobs that estimate thermo with quantum mechanics or machine lear
 training reactions' thermo depends on) or that write the kinetics datastore.
 """
 
+import gc
 import hashlib
 import logging
 import os
@@ -139,6 +140,9 @@ def load(cache_file):
     """
     if not os.path.isfile(cache_file):
         return None
+    # Unpickling creates millions of objects, which would trigger many (futile) garbage collections
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
     try:
         with open(cache_file, 'rb') as f:
             database = pickle.load(f)
@@ -146,6 +150,9 @@ def load(cache_file):
         logging.warning('Could not load the cached database from {0} ({1}: {2}); loading the database '
                         'from its files instead.'.format(cache_file, type(e).__name__, e))
         return None
+    finally:
+        if gc_was_enabled:
+            gc.enable()
     # Unpickling does not run RMGDatabase.__init__(), which registers the database globally
     rmgpy.data.rmg.database = database
     logging.info('Loaded the prepared database from the cache file {0}'.format(cache_file))
