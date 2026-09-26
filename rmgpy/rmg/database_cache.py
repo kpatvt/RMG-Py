@@ -55,7 +55,7 @@ import rmgpy
 import rmgpy.data.rmg
 
 CACHE_ENVIRONMENT_VARIABLE = 'RMG_DATABASE_CACHE'
-_CACHE_FORMAT_VERSION = 1
+_CACHE_FORMAT_VERSION = 2
 
 
 def _fingerprint_tree(root, extensions=None):

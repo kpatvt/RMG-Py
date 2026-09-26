@@ -105,6 +105,8 @@ class KineticsDatabase(object):
             'families': self.families,
             'libraries': self.libraries,
             'library_order': self.library_order,
+            'recommended_families': self.recommended_families,
+            'external_library_labels': self.external_library_labels,
         }
         return KineticsDatabase, (), d
 
@@ -115,6 +117,11 @@ class KineticsDatabase(object):
         self.families = d['families']
         self.libraries = d['libraries']
         self.library_order = d['library_order']
+        # Not stored by older versions
+        if 'recommended_families' in d:
+            self.recommended_families = d['recommended_families']
+        if 'external_library_labels' in d:
+            self.external_library_labels = d['external_library_labels']
 
     def load(self, path, families=None, libraries=None, depositories=None):
         """

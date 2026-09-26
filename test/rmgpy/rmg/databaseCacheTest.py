@@ -94,3 +94,35 @@ class TestDatabaseCache:
         with open(cache_file, "wb") as f:
             f.write(b"not a pickle")
         assert database_cache.load(cache_file) is None
+
+
+class TestDatabasePickling:
+    """
+    The database cache pickles the prepared database, so all state that is used while generating
+    a model must survive pickling.
+    """
+
+    def test_thermo_database_state(self):
+        import pickle
+        import rmgpy.quantity
+        from rmgpy.data.thermo import ThermoDatabase, SIDT_TAGGINGS_AND_DECOMPOSITIONS
+
+        thermo = ThermoDatabase()
+        thermo.binding_energies = {'C': rmgpy.quantity.Energy(-6.5, 'eV/molecule')}
+        thermo.adsorption_groups = 'adsorptionSIDTPt111'
+        thermo.sidt_taggings_and_decompositions = dict(SIDT_TAGGINGS_AND_DECOMPOSITIONS)
+        copy = pickle.loads(pickle.dumps(thermo))
+        assert copy.binding_energies['C'].value_si == thermo.binding_energies['C'].value_si
+        assert copy.adsorption_groups == 'adsorptionSIDTPt111'
+        assert copy.sidt_taggings_and_decompositions == SIDT_TAGGINGS_AND_DECOMPOSITIONS
+
+    def test_kinetics_database_state(self):
+        import pickle
+        from rmgpy.data.kinetics.database import KineticsDatabase
+
+        kinetics = KineticsDatabase()
+        kinetics.external_library_labels = {'/path/to/library': 'library'}
+        kinetics.recommended_families = {'default': {'H_Abstraction'}}
+        copy = pickle.loads(pickle.dumps(kinetics))
+        assert copy.external_library_labels == {'/path/to/library': 'library'}
+        assert copy.recommended_families == {'default': {'H_Abstraction'}}

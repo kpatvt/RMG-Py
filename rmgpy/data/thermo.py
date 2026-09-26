@@ -63,6 +63,62 @@ _multiplicity_labels = {1: 'S', 2: 'D', 3: 'T', 4: 'Q', 5: 'V'}
 
 ################################################################################
 
+def _add_monodentate_tag(m):
+    for a in m.atoms:
+        if a.is_surface_site():
+            adatom = list(a.bonds.keys())[0]
+            adatom.label = "*"
+            break
+
+
+def _add_bidentate_tag(m):
+    structs = []
+    sites = m.get_surface_sites()
+    s1 = sites[0]
+    s2 = sites[1]
+    paths = find_shortest_paths(s1,s2)
+    path = paths[0]
+    for a in path:
+        a.label = "*"
+
+
+def _add_vdw_tag(m):
+    for a in m.atoms:
+        if a.is_surface_site():
+            a.label = "*"
+            break
+
+
+def _multidentate_decomposition(m):
+    structs = []
+    sites = m.get_surface_sites()
+    for tup in itertools.combinations(sites,2):
+        s1 = tup[0]
+        s2 = tup[1]
+        paths = find_shortest_paths(s1,s2)
+        path = paths[0]
+        inds = []
+        for p in path:
+            inds.append(m.atoms.index(p))
+        mol = m.copy(deep=True)
+        for ind in inds:
+            mol.atoms[ind].label = "*"
+        structs.append(mol)
+
+    return structs
+
+
+# The functions that tag (or decompose) adsorbates for the thermo SIDTs (see ThermoDatabase.load_sidts).
+# They are module-level functions so that the thermo database can be pickled with them.
+SIDT_TAGGINGS_AND_DECOMPOSITIONS = {
+    "Pt111_monodentate_adsorption_corrections": _add_monodentate_tag,
+    "Pt111_bidentate_adsorption_corrections": _add_bidentate_tag,
+    "Pt111_vdw_adsorption_corrections": _add_vdw_tag,
+    "Pt111_multidentate_adsorption_corrections": _multidentate_decomposition, #special
+}
+
+
+
 def save_entry(f, entry):
     """
     Write a Pythonic string representation of the given `entry` in the thermo
@@ -891,6 +947,9 @@ class ThermoDatabase(object):
             'sidts': self.sidts,
             'library_order': self.library_order,
             'surface' : self.surface,
+            'sidt_taggings_and_decompositions': self.sidt_taggings_and_decompositions,
+            'adsorption_groups': self.adsorption_groups,
+            'binding_energies': self.binding_energies,
         }
         return ThermoDatabase, (), d
 
@@ -904,6 +963,13 @@ class ThermoDatabase(object):
         self.sidts = d['sidts']
         self.library_order = d['library_order']
         self.surface = d['surface']
+        # Not stored by older versions
+        if 'sidt_taggings_and_decompositions' in d:
+            self.sidt_taggings_and_decompositions = d['sidt_taggings_and_decompositions']
+        if 'adsorption_groups' in d:
+            self.adsorption_groups = d['adsorption_groups']
+        if 'binding_energies' in d:
+            self.binding_energies = d['binding_energies']
 
     def load(self, path, libraries=None, depository=True, surface=False):
         """
@@ -1043,55 +1109,9 @@ class ThermoDatabase(object):
             "Pt111_bidentate_adsorption_corrections",
             "Pt111_vdw_adsorption_corrections",
         ]
-        
-        def add_monodentate_tag(m):
-            for a in m.atoms:
-                if a.is_surface_site():
-                    adatom = list(a.bonds.keys())[0]
-                    adatom.label = "*"
-                    break
-        
-        def add_bidentate_tag(m):
-            structs = []
-            sites = m.get_surface_sites()
-            s1 = sites[0]
-            s2 = sites[1]
-            paths = find_shortest_paths(s1,s2)
-            path = paths[0]
-            for a in path:
-                a.label = "*"
 
-        def add_vdw_tag(m):
-            for a in m.atoms:
-                if a.is_surface_site():
-                    a.label = "*"
-                    break
-        
-        def multidentate_decomposition(m):
-            structs = []
-            sites = m.get_surface_sites()
-            for tup in itertools.combinations(sites,2):
-                s1 = tup[0]
-                s2 = tup[1]
-                paths = find_shortest_paths(s1,s2)
-                path = paths[0]
-                inds = []
-                for p in path:
-                    inds.append(m.atoms.index(p))
-                mol = m.copy(deep=True)
-                for ind in inds:
-                    mol.atoms[ind].label = "*"
-                structs.append(mol)
-        
-            return structs
-        
-        self.sidt_taggings_and_decompositions = {
-            "Pt111_monodentate_adsorption_corrections": add_monodentate_tag,
-            "Pt111_bidentate_adsorption_corrections": add_bidentate_tag,
-            "Pt111_vdw_adsorption_corrections": add_vdw_tag,
-            "Pt111_multidentate_adsorption_corrections": multidentate_decomposition, #special
-        }
-        
+        self.sidt_taggings_and_decompositions = dict(SIDT_TAGGINGS_AND_DECOMPOSITIONS)
+
         for category in categories:
             if os.path.exists(os.path.join(path,category+".json")):
                 nodes = read_nodes(os.path.join(path,category+".json"))
