@@ -867,7 +867,7 @@ class RMG(util.Subject):
         """
 
         cfg_chemkin  = self.chemkin_writer_config  or WriterConfig(save_interval=1)
-        cfg_rms      = self.rms_writer_config      or WriterConfig(save_interval=1)
+        cfg_rms      = self.rms_writer_config      or WriterConfig(save_interval=-1)
         cfg_cantera1 = self.cantera1_writer_config or WriterConfig(save_interval=0)
         cfg_cantera2 = self.cantera2_writer_config or WriterConfig(save_interval=0)
         cfg_html     = self.html_writer_config     or WriterConfig(save_interval=0)

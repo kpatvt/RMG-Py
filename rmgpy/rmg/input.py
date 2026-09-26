@@ -1519,7 +1519,9 @@ def options(name='Seed', generateSeedEachIteration=True, saveSeedToDatabase=Fals
     rmg.save_seed_modulus = saveSeedModulus
 
     rmg.chemkin_writer_config = _parse_writer_config(generateChemkin)
-    rmg.rms_writer_config = _parse_writer_config(generateRMSYAML)
+    # The RMS YAML file is written at the end of the job by default: writing it every iteration is
+    # expensive for large models, and RMS itself only needs the final mechanism
+    rmg.rms_writer_config = _parse_writer_config(generateRMSYAML, default_save_interval=-1)
     rmg.cantera1_writer_config = _parse_writer_config(generateCanteraYAML1)
     rmg.cantera2_writer_config = _parse_writer_config(generateCanteraYAML2)
     rmg.html_writer_config = _parse_writer_config(generateOutputHTML)
