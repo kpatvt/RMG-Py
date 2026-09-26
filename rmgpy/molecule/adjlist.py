@@ -1033,6 +1033,12 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
     atom_type_width = max([len(s) for s in atom_types.values()]) + 1
     atom_unpaired_electrons_width = max([len(s) for s in atom_unpaired_electrons.values()])
 
+    # Positions of the atoms, for sorting the bonded atoms the same way as the atoms
+    # (the atoms are distinct, so this gives the same order as sorting by atoms.index)
+    atom_positions = {}
+    for position, atom in enumerate(atoms):
+        atom_positions.setdefault(atom, position)
+
     # Assemble the adjacency list
     for atom in atoms:
         if atom not in atom_numbers:
@@ -1068,7 +1074,7 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
         # Bonds list
         atoms2 = list(atom.bonds.keys())
         # sort them the same way as the atoms
-        atoms2.sort(key=atoms.index)
+        atoms2.sort(key=atom_positions.__getitem__)
 
         for atom2 in atoms2:
             if atom2 not in atom_numbers:

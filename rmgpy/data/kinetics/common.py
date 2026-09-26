@@ -58,7 +58,9 @@ def save_entry(f, entry):
                 # already in SMILES string format
                 smiles = mol
             else:
-                smiles = mol.to_smiles()
+                # The collider molecules do not change, so use the SMILES cached on the molecule
+                # (this is called for every pressure-dependent reaction whenever a library is saved)
+                smiles = mol.smiles
 
             efficiencies[smiles] = eff
         keys = list(efficiencies.keys())

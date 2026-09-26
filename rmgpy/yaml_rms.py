@@ -32,6 +32,7 @@ This file defines functions for outputting the RMG generated mechanism to a .rms
 Reaction Mechanism Simulator (RMS)
 """
 
+import gc
 import os
 try:
     from yaml import CDumper as Dumper
@@ -63,8 +64,16 @@ def convert_chemkin_to_rms(chemkin_path, dictionary_path=None, output="chem.rms"
 
 def write_rms(spcs, rxns, solvent=None, solvent_data=None, path="chem.rms"):
     result_dict = get_mech_dict(spcs, rxns, solvent=solvent, solvent_data=solvent_data)
-    with open(path, 'w') as f:
-        yaml.dump(result_dict, stream=f, Dumper=Dumper, sort_keys=False)
+    # Dumping creates many temporary objects (the YAML nodes), which would trigger frequent
+    # garbage collections that find no garbage
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with open(path, 'w') as f:
+            yaml.dump(result_dict, stream=f, Dumper=Dumper, sort_keys=False)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 def get_mech_dict(spcs, rxns, solvent='solvent', solvent_data=None):
