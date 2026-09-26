@@ -667,6 +667,40 @@ class TestMoleculeAdjLists:
         new_molecule = Molecule().from_adjacency_list(adjlist_1)
         assert molecule.is_isomorphic(new_molecule)
 
+    def test_to_adjacency_list_fields(self):
+        """
+        Test the exact text of all atom fields, including hydrogen removal, labels, isotopes, sites and morphologies.
+        """
+        molecule = Molecule().from_adjacency_list(
+            """multiplicity 2
+1 *1 C u1 p0 c0 i13 {2,S} {3,S} {4,S}
+2 *2 H u0 p0 c0 {1,S}
+3    H u0 p0 c0 {1,S}
+4    O u0 p2 c0 {1,S} {5,S}
+5    H u0 p0 c0 i2 {4,S}"""
+        )
+        molecule.atoms[3].site = "ontop"
+        molecule.atoms[3].morphology = "terrace"
+        assert molecule.to_adjacency_list(label="CH2OD") == (
+            "CH2OD\n"
+            "multiplicity 2\n"
+            "1 *1 C u1 p0 c0 i13 {2,S} {3,S} {4,S}\n"
+            "2 *2 H u0 p0 c0 {1,S}\n"
+            "3    H u0 p0 c0 {1,S}\n"
+            '4    O u0 p2 c0 s"ontop" m"terrace" {1,S} {5,S}\n'
+            "5    H u0 p0 c0 i2 {4,S}\n"
+        )
+        # Unlabeled hydrogen atoms are left out, together with their bonds
+        assert molecule.to_adjacency_list(remove_h=True) == (
+            "multiplicity 2\n"
+            "1 *1 C u1 p0 c0 i13 {2,S} {3,S}\n"
+            "2 *2 H u0 p0 c0 {1,S}\n"
+            '3    O u0 p2 c0 s"ontop" m"terrace" {1,S}\n'
+        )
+        # Unless the molecule only has hydrogen atoms
+        hydrogen = Molecule(smiles="[H][H]")
+        assert hydrogen.to_adjacency_list(remove_h=True) == "1 H u0 p0 c0 {2,S}\n2 H u0 p0 c0 {1,S}\n"
+
     def test_to_adjacency_list_for_non_integer_bonds(self):
         """
         Test the adjacency list can be created for molecules with bond orders
