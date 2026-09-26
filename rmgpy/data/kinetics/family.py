@@ -44,7 +44,6 @@ from copy import deepcopy
 
 import numpy as np
 from scipy.optimize import OptimizeWarning
-from sklearn.model_selection import KFold
 
 from rmgpy import settings
 from rmgpy.constraints import fails_species_constraints
@@ -65,7 +64,6 @@ from rmgpy.molecule import Bond, GroupBond, Group, Molecule
 from rmgpy.molecule.atomtype import ATOMTYPES
 from rmgpy.reaction import Reaction, same_species_lists
 from rmgpy.species import Species
-from rmgpy.tools.uncertainty import KineticParameterUncertainty
 from rmgpy.molecule.fragment import Fragment
 import rmgpy.constants as constants
 from rmgpy.data.solvation import SoluteData, add_solute_data, SoluteTSData, to_soluteTSdata
@@ -4020,6 +4018,8 @@ class KineticsFamily(Database):
             if folds == 0:
                 folds = len(rxns)
 
+            # Imported here, since importing scikit-learn takes about half a second
+            from sklearn.model_selection import KFold
             kf = KFold(folds, shuffle=True, random_state=random_state)
             kfsplits = kf.split(rxns)
         else:
@@ -4110,6 +4110,9 @@ class KineticsFamily(Database):
         errors = {}
         uncs = {}
 
+        # Imported here, since importing scikit-learn and matplotlib takes most of a second
+        from sklearn.model_selection import KFold
+        from rmgpy.tools.uncertainty import KineticParameterUncertainty
         kpu = KineticParameterUncertainty()
         rxns = np.array(self.get_training_set(remove_degeneracy=True,get_reverse=get_reverse))
 
