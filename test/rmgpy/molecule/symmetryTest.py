@@ -736,3 +736,12 @@ multiplicity 3
         assert _indistinguishable(mol.atoms[1], mol.atoms[3])
         # O is different from H
         assert not _indistinguishable(mol.atoms[6], mol.atoms[7])
+
+    def test_indistinguishable_resonance_hybrid(self):
+        """
+        Test that atoms of a resonance hybrid are still indistinguishable when their fractional
+        bond orders differ only by floating point error (phenyl radical, symmetry number 2)
+        """
+        species = Species().from_smiles("[c]1ccccc1")
+        species.generate_resonance_structures()
+        assert species.get_symmetry_number() == 2

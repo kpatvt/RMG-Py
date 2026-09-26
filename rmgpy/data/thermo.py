@@ -63,6 +63,66 @@ _multiplicity_labels = {1: 'S', 2: 'D', 3: 'T', 4: 'Q', 5: 'V'}
 
 ################################################################################
 
+def _add_monodentate_tag(m):
+    for a in m.atoms:
+        if a.is_surface_site():
+            adatom = list(a.bonds.keys())[0]
+            adatom.label = "*"
+            break
+
+
+def _add_bidentate_tag(m):
+    structs = []
+    sites = m.get_surface_sites()
+    s1 = sites[0]
+    s2 = sites[1]
+    paths = find_shortest_paths(s1,s2)
+    path = paths[0]
+    for a in path:
+        a.label = "*"
+
+
+def _add_vdw_tag(m):
+    for a in m.atoms:
+        if a.is_surface_site():
+            a.label = "*"
+            break
+
+
+def _multidentate_decomposition(m):
+    structs = []
+    sites = m.get_surface_sites()
+    for tup in itertools.combinations(sites,2):
+        s1 = tup[0]
+        s2 = tup[1]
+        paths = find_shortest_paths(s1,s2)
+        path = paths[0]
+        inds = []
+        for p in path:
+            inds.append(m.atoms.index(p))
+        mol = m.copy(deep=True)
+        for ind in inds:
+            mol.atoms[ind].label = "*"
+        structs.append(mol)
+
+    return structs
+
+
+# The functions that tag (or decompose) adsorbates for the thermo SIDTs (see ThermoDatabase.load_sidts).
+# They are module-level functions so that the thermo database can be pickled with them.
+SIDT_TAGGINGS_AND_DECOMPOSITIONS = {
+    "Pt111_monodentate_adsorption_corrections": _add_monodentate_tag,
+    "Pt111_bidentate_adsorption_corrections": _add_bidentate_tag,
+    "Pt111_vdw_adsorption_corrections": _add_vdw_tag,
+    "Pt111_multidentate_adsorption_corrections": _multidentate_decomposition, #special
+}
+
+
+# The maximum number of molecules for which ThermoDatabase._descend_ring_tree() keeps results
+# (keeping many molecules alive slows down garbage collection)
+_RING_DESCEND_CACHE_SIZE = 1000
+
+
 def save_entry(f, entry):
     """
     Write a Pythonic string representation of the given `entry` in the thermo
@@ -891,6 +951,9 @@ class ThermoDatabase(object):
             'sidts': self.sidts,
             'library_order': self.library_order,
             'surface' : self.surface,
+            'sidt_taggings_and_decompositions': self.sidt_taggings_and_decompositions,
+            'adsorption_groups': self.adsorption_groups,
+            'binding_energies': self.binding_energies,
         }
         return ThermoDatabase, (), d
 
@@ -904,6 +967,13 @@ class ThermoDatabase(object):
         self.sidts = d['sidts']
         self.library_order = d['library_order']
         self.surface = d['surface']
+        # Not stored by older versions
+        if 'sidt_taggings_and_decompositions' in d:
+            self.sidt_taggings_and_decompositions = d['sidt_taggings_and_decompositions']
+        if 'adsorption_groups' in d:
+            self.adsorption_groups = d['adsorption_groups']
+        if 'binding_energies' in d:
+            self.binding_energies = d['binding_energies']
 
     def load(self, path, libraries=None, depository=True, surface=False):
         """
@@ -1043,55 +1113,9 @@ class ThermoDatabase(object):
             "Pt111_bidentate_adsorption_corrections",
             "Pt111_vdw_adsorption_corrections",
         ]
-        
-        def add_monodentate_tag(m):
-            for a in m.atoms:
-                if a.is_surface_site():
-                    adatom = list(a.bonds.keys())[0]
-                    adatom.label = "*"
-                    break
-        
-        def add_bidentate_tag(m):
-            structs = []
-            sites = m.get_surface_sites()
-            s1 = sites[0]
-            s2 = sites[1]
-            paths = find_shortest_paths(s1,s2)
-            path = paths[0]
-            for a in path:
-                a.label = "*"
 
-        def add_vdw_tag(m):
-            for a in m.atoms:
-                if a.is_surface_site():
-                    a.label = "*"
-                    break
-        
-        def multidentate_decomposition(m):
-            structs = []
-            sites = m.get_surface_sites()
-            for tup in itertools.combinations(sites,2):
-                s1 = tup[0]
-                s2 = tup[1]
-                paths = find_shortest_paths(s1,s2)
-                path = paths[0]
-                inds = []
-                for p in path:
-                    inds.append(m.atoms.index(p))
-                mol = m.copy(deep=True)
-                for ind in inds:
-                    mol.atoms[ind].label = "*"
-                structs.append(mol)
-        
-            return structs
-        
-        self.sidt_taggings_and_decompositions = {
-            "Pt111_monodentate_adsorption_corrections": add_monodentate_tag,
-            "Pt111_bidentate_adsorption_corrections": add_bidentate_tag,
-            "Pt111_vdw_adsorption_corrections": add_vdw_tag,
-            "Pt111_multidentate_adsorption_corrections": multidentate_decomposition, #special
-        }
-        
+        self.sidt_taggings_and_decompositions = dict(SIDT_TAGGINGS_AND_DECOMPOSITIONS)
+
         for category in categories:
             if os.path.exists(os.path.join(path,category+".json")):
                 nodes = read_nodes(os.path.join(path,category+".json"))
@@ -2621,6 +2645,54 @@ class ThermoDatabase(object):
 
         return estimated_bicyclic_thermo_data
 
+    def _descend_ring_tree(self, ring_database, molecule, ring):
+        """
+        Return the nodes of the ring or polycyclic tree `ring_database` that `molecule` matches with
+        each atom of `ring` labeled in turn, i.e. ``ring_database.descend_tree(molecule, {'*': atom})``.
+
+        The same (saturated) molecules are corrected for their rings again and again, e.g. once for
+        each radical derived from them, and descending these trees is expensive. The node matched
+        for an atom only depends on the structure of the molecule (and its atom labels), so the
+        results are cached for each atom of a copy of the molecule, and looked up for an isomorphic
+        molecule through an isomorphism that also maps each atom to one with the same label.
+        """
+        if type(molecule) is not Molecule:
+            return [ring_database.descend_tree(molecule, {'*': atom}) for atom in ring]
+        cache = self.__dict__.setdefault('_ring_descend_cache', {})
+        key = (id(ring_database), molecule.fingerprint, molecule.multiplicity, len(molecule.atoms),
+               tuple(sorted([atom.label for atom in molecule.atoms if atom.label])))
+        record = None
+        mapping = None
+        for candidate in cache.get(key, ()):
+            if candidate[0] is not ring_database:
+                continue
+            candidate_mapping = molecule.find_first_isomorphism(candidate[1], strict=True)
+            if candidate_mapping is not None and all(atom.label == other.label
+                                                     for atom, other in candidate_mapping.items()):
+                record = candidate
+                mapping = candidate_mapping
+                break
+        if record is None:
+            if sum(len(records) for records in cache.values()) >= _RING_DESCEND_CACHE_SIZE:
+                cache.clear()
+            copy = molecule.copy(deep=True)
+            mapping = dict(zip(molecule.atoms, copy.atoms))
+            record = (ring_database, copy, {})
+            cache.setdefault(key, []).append(record)
+        results = record[2]
+        entries = []
+        for atom in ring:
+            target = mapping[atom]
+            if target in results:
+                entry = results[target]
+                # Descending the tree would sort the atoms of the molecule (as the isomorphism check
+                # above already did), so that later steps see the same atom order
+                molecule.sort_vertices()
+            else:
+                entry = results[target] = ring_database.descend_tree(molecule, {'*': atom})
+            entries.append(entry)
+        return entries
+
     def _add_ring_correction_thermo_data_from_tree(self, thermo_data, ring_database, molecule, ring):
         """
         Determine the ring correction group additivity thermodynamic data for the given
@@ -2628,13 +2700,9 @@ class ThermoDatabase(object):
         `thermo_data`.
         Also returns the matched ring group from the database from which the data originated.
         """
-        matched_ring_entries = []
         # label each atom in the ring individually to try to match the group
         # for each ring, save only the ring that is matches the most specific leaf in the tree.
-        for atom in ring:
-            atoms = {'*': atom}
-            entry = ring_database.descend_tree(molecule, atoms)
-            matched_ring_entries.append(entry)
+        matched_ring_entries = self._descend_ring_tree(ring_database, molecule, ring)
 
         if not matched_ring_entries:
             raise KeyError('Node not found in database.')

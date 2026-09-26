@@ -323,25 +323,90 @@ cdef class Graph(object):
         cdef int index1, index2
 
         other = Graph()
-        vertices = self.vertices
-        mapping = {}
-        for vertex in vertices:
-            if deep:
-                vertex2 = other.add_vertex(vertex.copy())
-                mapping[vertex] = vertex2
-            else:
+        if deep:
+            self._deep_copy_into(other)
+        else:
+            for vertex in self.vertices:
                 edges = vertex.edges
                 other.add_vertex(vertex)
                 vertex.edges = edges
-        if deep:
-            for vertex1 in vertices:
-                for vertex2 in vertex1.edges:
-                    edge = vertex1.edges[vertex2]
-                    edge = edge.copy()
-                    edge.vertex1 = mapping[vertex1]
-                    edge.vertex2 = mapping[vertex2]
-                    other.add_edge(edge)
         return other
+
+    cdef list _deep_copy_into(self, Graph other):
+        """
+        Add deep copies of the vertices and edges of this graph to the empty graph `other`,
+        and return the list of new vertices (in the same order as ``self.vertices``).
+
+        Each edge is copied once, and the new edges are inserted directly into the vertex
+        edge dictionaries in the same order as :meth:`add_edge` would, without its linear
+        membership checks. Each edge is copied when it is first reached, i.e. from the vertex that
+        comes first in ``self.vertices``. Vertices are looked up by ``id`` because vertices hash on
+        their element, which collides heavily.
+        """
+        cdef Vertex vertex, vertex1, vertex2, new1, new2
+        cdef Edge edge
+        cdef dict index_map = {}
+        cdef list new_vertices
+        cdef Py_ssize_t index1, index2
+
+        new_vertices = other.vertices
+        for index1 in range(len(self.vertices)):
+            vertex = self.vertices[index1]
+            new1 = vertex.copy()
+            new1.edges = {}
+            new_vertices.append(new1)
+            index_map[id(vertex)] = index1
+
+        for index1 in range(len(self.vertices)):
+            vertex1 = self.vertices[index1]
+            new1 = new_vertices[index1]
+            for vertex2, edge in vertex1.edges.items():
+                index2 = index_map[id(vertex2)]
+                if index2 < index1:
+                    # This edge was already copied when its other vertex was visited
+                    continue
+                new2 = new_vertices[index2]
+                edge = edge.copy()
+                # Orient the copy as the previous implementation did, which copied every
+                # edge from both ends and kept the copy made from the second end
+                edge.vertex1 = new2
+                edge.vertex2 = new1
+                new1.edges[new2] = edge
+                new2.edges[new1] = edge
+        return new_vertices
+
+    cdef list _topology_copy_into(self, Graph other):
+        """
+        Add plain :class:`Vertex` and :class:`Edge` objects with the same connectivity as this graph
+        to the empty graph `other`, and return the list of new vertices (in the same order as
+        ``self.vertices``). The edges are inserted in the same order as :meth:`_deep_copy_into`
+        inserts them, so graph traversals visit the vertices in the same order as in a deep copy.
+        This is much cheaper than a deep copy for algorithms that only need the connectivity.
+        """
+        cdef Vertex vertex, vertex1, vertex2, new1, new2
+        cdef Edge edge
+        cdef dict index_map = {}
+        cdef list new_vertices
+        cdef Py_ssize_t index1, index2
+
+        new_vertices = other.vertices
+        for index1 in range(len(self.vertices)):
+            vertex = self.vertices[index1]
+            new_vertices.append(Vertex())
+            index_map[id(vertex)] = index1
+
+        for index1 in range(len(self.vertices)):
+            vertex1 = self.vertices[index1]
+            new1 = new_vertices[index1]
+            for vertex2 in vertex1.edges:
+                index2 = index_map[id(vertex2)]
+                if index2 < index1:
+                    continue
+                new2 = new_vertices[index2]
+                edge = Edge(new2, new1)
+                new1.edges[new2] = edge
+                new2.edges[new1] = edge
+        return new_vertices
 
     cpdef dict copy_and_map(self):
         """
@@ -356,19 +421,10 @@ cdef class Graph(object):
         cdef int index1, index2
 
         other = Graph()
-        vertices = self.vertices
+        new_vertices = self._deep_copy_into(other)
         mapping = {}
-        for vertex in vertices:
-            vertex2 = other.add_vertex(vertex.copy())
-            mapping[vertex] = vertex2
-
-        for vertex1 in vertices:
-            for vertex2 in vertex1.edges:
-                edge = vertex1.edges[vertex2]
-                edge = edge.copy()
-                edge.vertex1 = mapping[vertex1]
-                edge.vertex2 = mapping[vertex2]
-                other.add_edge(edge)
+        for index1 in range(len(self.vertices)):
+            mapping[self.vertices[index1]] = new_vertices[index1]
         return mapping
 
     cpdef Graph merge(self, Graph other):
@@ -538,6 +594,20 @@ cdef class Graph(object):
         """
         return vf2.find_isomorphism(self, other, initial_map, save_order=save_order, strict=strict)
 
+    cpdef dict find_first_isomorphism(self, Graph other, dict initial_map=None, bint save_order=False, bint strict=True):
+        """
+        Return the first isomorphism mapping (a dict from the vertices of this graph to those of
+        `other`) found by the VF2 algorithm, or ``None`` if the graphs are not isomorphic. Unlike
+        :meth:`find_isomorphism`, this does not enumerate all mappings, which can be very many for
+        symmetric graphs.
+
+        Args:
+            initial_map (dict, optional): initial atom mapping to use
+            save_order (bool, optional):  if ``True``, reset atom order after performing atom isomorphism
+            strict (bool, optional):     if ``False``, perform isomorphism ignoring electrons
+        """
+        return vf2.find_first_isomorphism(self, other, initial_map, save_order=save_order, strict=strict)
+
     cpdef bint is_subgraph_isomorphic(self, Graph other, dict initial_map=None, bint save_order=False) except -2:
         """
         Returns :data:`True` if `other` is subgraph isomorphic and :data:`False`
@@ -554,35 +624,90 @@ cdef class Graph(object):
         """
         return vf2.find_subgraph_isomorphisms(self, other, initial_map, save_order=save_order)
 
+    cpdef set _find_bridges(self, list roots):
+        """
+        Return the set of bridges (edges whose removal disconnects the graph) in
+        the connected components containing the vertices in `roots`, using an
+        iterative version of Tarjan's O(V+E) lowlink algorithm.
+
+        Each bridge is stored twice, as ``(id(vertex1), id(vertex2))`` and
+        ``(id(vertex2), id(vertex1))``. An edge lies on a cycle if and only if
+        it is not a bridge, and a vertex lies on a cycle if and only if at least
+        one of its edges is not a bridge. Vertex ids are used as keys because
+        vertices hash on their element, which collides heavily.
+        """
+        cdef dict disc = {}, low = {}
+        cdef set bridges = set()
+        cdef list stack
+        cdef Vertex root, v, w, parent
+        cdef int timer = 0
+        cdef bint advanced
+        for root in roots:
+            if id(root) in disc:
+                continue
+            disc[id(root)] = low[id(root)] = timer
+            timer += 1
+            stack = [(root, None, iter(root.edges))]
+            while stack:
+                v, parent, it = stack[-1]
+                advanced = False
+                for w in it:
+                    if w is parent:
+                        continue
+                    if id(w) in disc:
+                        if disc[id(w)] < low[id(v)]:
+                            low[id(v)] = disc[id(w)]
+                    else:
+                        disc[id(w)] = low[id(w)] = timer
+                        timer += 1
+                        stack.append((w, v, iter(w.edges)))
+                        advanced = True
+                        break
+                if not advanced:
+                    stack.pop()
+                    if parent is not None:
+                        if low[id(v)] < low[id(parent)]:
+                            low[id(parent)] = low[id(v)]
+                        if low[id(v)] > disc[id(parent)]:
+                            bridges.add((id(parent), id(v)))
+                            bridges.add((id(v), id(parent)))
+        return bridges
+
     cpdef bint is_cyclic(self) except -2:
         """
         Return ``True`` if one or more cycles are present in the graph or
         ``False`` otherwise.
         """
         cdef Vertex vertex
+        cdef int num_edges = 0
         for vertex in self.vertices:
-            if self.is_vertex_in_cycle(vertex):
-                return True
-        return False
+            num_edges += len(vertex.edges)
+        # num_edges counts every edge twice, as does the set of bridges
+        return num_edges > len(self._find_bridges(self.vertices))
 
     cpdef bint is_vertex_in_cycle(self, Vertex vertex) except -2:
         """
         Return ``True`` if the given `vertex` is contained in one or more
         cycles in the graph, or ``False`` if not.
         """
-        return self._is_chain_in_cycle([vertex])
+        cdef set bridges
+        cdef Vertex other
+        if len(vertex.edges) < 2:
+            return False
+        bridges = self._find_bridges([vertex])
+        for other in vertex.edges:
+            if (id(vertex), id(other)) not in bridges:
+                return True
+        return False
 
     cpdef bint is_edge_in_cycle(self, Edge edge) except -2:
         """
         Return :data:`True` if the edge between vertices `vertex1` and `vertex2`
         is in one or more cycles in the graph, or :data:`False` if not.
         """
-        cdef list cycles
-        cycles = self.get_all_cycles(edge.vertex1)
-        for cycle in cycles:
-            if edge.vertex2 in cycle:
-                return True
-        return False
+        if len(edge.vertex1.edges) < 2 or len(edge.vertex2.edges) < 2:
+            return False
+        return (id(edge.vertex1), id(edge.vertex2)) not in self._find_bridges([edge.vertex1])
 
     cpdef bint _is_chain_in_cycle(self, list chain) except -2:
         """
@@ -614,11 +739,15 @@ cdef class Graph(object):
         Returns all vertices belonging to one or more cycles.        
         """
         cdef list cyclic_vertices
-        # Loop through all vertices and check whether they are cyclic
+        cdef set bridges
+        cdef Vertex vertex, other
+        bridges = self._find_bridges(self.vertices)
         cyclic_vertices = []
         for vertex in self.vertices:
-            if self.is_vertex_in_cycle(vertex):
-                cyclic_vertices.append(vertex)
+            for other in vertex.edges:
+                if (id(vertex), id(other)) not in bridges:
+                    cyclic_vertices.append(vertex)
+                    break
         return cyclic_vertices
 
     cpdef list get_all_cycles(self, Vertex starting_vertex):
@@ -646,10 +775,12 @@ cdef class Graph(object):
         cdef bint done, found, lone_carbon
         cdef list cycle_list, cycles, cycle, graphs, neighbors, vertices_to_remove, vertices, cycle_set_list
         cdef Vertex vertex, root_vertex
-        cdef set set1, set2
+        cdef set set1, set2, cyclic_ids
 
-        # Make a copy of the graph so we don't modify the original
-        graph = self.copy(deep=True)
+        # Make a copy of the graph so we don't modify the original. Only the connectivity is needed,
+        # so a copy of the topology is used instead of a (much more expensive) deep copy.
+        graph = Graph()
+        self._topology_copy_into(graph)
         vertices = graph.vertices[:]
 
         # Step 1: Remove all terminal vertices
@@ -664,10 +795,10 @@ cdef class Graph(object):
                 graph.remove_vertex(vertex)
 
         # Step 2: Remove all other vertices that are not part of cycles
+        cyclic_ids = {id(vertex) for vertex in graph.get_all_cyclic_vertices()}
         vertices_to_remove = []
         for vertex in graph.vertices:
-            found = graph.is_vertex_in_cycle(vertex)
-            if not found:
+            if id(vertex) not in cyclic_ids:
                 vertices_to_remove.append(vertex)
         # Remove identified vertices from graph
         for vertex in vertices_to_remove:
@@ -838,6 +969,68 @@ cdef class Graph(object):
                 longest_cycle = cycle
         return longest_cycle
 
+    cdef bint _is_simple_mapping(self, Graph other, dict mapping):
+        """
+        Return ``True`` if `mapping` is one-to-one and only contains vertices of `self` (keys) and
+        `other` (values), in which case :meth:`_are_mapped_edges_valid` can be used.
+        """
+        cdef set ids1, ids2, mapped_ids2
+        cdef Vertex vertex1, vertex2
+        ids1 = {id(vertex1) for vertex1 in self.vertices}
+        ids2 = {id(vertex2) for vertex2 in other.vertices}
+        mapped_ids2 = set()
+        for vertex1, vertex2 in mapping.items():
+            if id(vertex1) not in ids1 or id(vertex2) not in ids2 or id(vertex2) in mapped_ids2:
+                return False
+            mapped_ids2.add(id(vertex2))
+        return True
+
+    cdef bint _are_mapped_edges_valid(self, Graph other, dict mapping, bint equivalent, bint strict) except -2:
+        """
+        Check the edges between the mapped vertices for :meth:`is_mapping_valid`, for a one-to-one
+        mapping between vertices of the two graphs. Instead of testing every pair of mapped vertices
+        for an edge (quadratic in the number of vertices, with a linear membership test for each), this
+        only visits the edges of the mapped vertices, which gives the same result.
+        """
+        cdef dict inverse
+        cdef Vertex vertex1, vertex2, neighbor1, neighbor2
+        cdef Edge edge1, edge2
+
+        inverse = {}
+        for vertex1, vertex2 in mapping.items():
+            inverse[id(vertex2)] = vertex1
+
+        # Edges of self between mapped vertices must be present (and equivalent) in other,
+        # except that self may have extra edges when checking specific cases (subgraphs)
+        for vertex1, vertex2 in mapping.items():
+            for neighbor1, edge1 in vertex1.edges.items():
+                neighbor2 = mapping.get(neighbor1)
+                if neighbor2 is None:
+                    continue
+                edge2 = vertex2.edges.get(neighbor2)
+                if edge2 is None:
+                    if equivalent:
+                        return False
+                    continue
+                if strict:
+                    if equivalent:
+                        if not edge1.equivalent(edge2):
+                            return False
+                    else:
+                        if not edge1.is_specific_case_of(edge2):
+                            return False
+
+        # Edges of other between mapped vertices must be present in self
+        for vertex1, vertex2 in mapping.items():
+            for neighbor2 in vertex2.edges:
+                neighbor1 = inverse.get(id(neighbor2))
+                if neighbor1 is None:
+                    continue
+                if neighbor1 not in vertex1.edges:
+                    return False
+
+        return True
+
     cpdef bint is_mapping_valid(self, Graph other, dict mapping, bint equivalent=True, bint strict=True) except -2:
         """
         Check that a proposed `mapping` of vertices from `self` to `other`
@@ -862,6 +1055,8 @@ cdef class Graph(object):
                     return False
 
         # Check that any edges connected mapped vertices are equivalent
+        if self._is_simple_mapping(other, mapping):
+            return self._are_mapped_edges_valid(other, mapping, equivalent, strict)
         vertices1 = list(mapping.keys())
         vertices2 = list(mapping.values())
         for i in range(len(vertices1)):

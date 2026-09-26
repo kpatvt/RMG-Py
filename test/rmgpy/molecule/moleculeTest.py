@@ -3479,3 +3479,67 @@ multiplicity 2
         assert mol.get_ring_count_in_largest_fused_ring_system() == 2
         mol = Molecule(smiles="C[C]1C2C(=O)C3CC4C(=O)C=C2CC143")
         assert mol.get_ring_count_in_largest_fused_ring_system() == 4
+
+
+class TestFindFirstIsomorphism:
+    """find_first_isomorphism returns one valid mapping without enumerating all of them"""
+
+    def test_find_first_isomorphism(self):
+        from rmgpy.molecule import Molecule
+        molecule1 = Molecule().from_smiles("CC(C)C")
+        molecule2 = Molecule().from_smiles("CC(C)C")
+        mapping = molecule1.find_first_isomorphism(molecule2)
+        assert mapping is not None
+        assert len(mapping) == len(molecule1.atoms)
+        assert set(mapping.values()) == set(molecule2.atoms)
+        assert molecule1.is_mapping_valid(molecule2, mapping, equivalent=True)
+        assert mapping in molecule1.find_isomorphism(molecule2)
+        assert molecule1.find_first_isomorphism(Molecule().from_smiles("CCCC")) is None
+        # An initial mapping is respected
+        carbon1 = [atom for atom in molecule1.atoms if atom.is_carbon() and len(atom.edges) == 4 and
+                   sum(1 for a in atom.edges if a.is_carbon()) == 1][0]
+        carbons2 = [atom for atom in molecule2.atoms if atom.is_carbon() and
+                    sum(1 for a in atom.edges if a.is_carbon()) == 1]
+        for carbon2 in carbons2:
+            mapping = molecule1.find_first_isomorphism(molecule2, initial_map={carbon1: carbon2})
+            assert mapping[carbon1] is carbon2
+
+
+class TestRingPerceptionCache:
+    """The SSSR is cached by what determines it; cached results must equal freshly computed ones"""
+
+    def test_cached_sssr_matches_fresh(self):
+        import rmgpy.molecule.molecule as molecule_module
+        from rmgpy.molecule import Molecule
+        for smiles in ["c1ccc2ccccc2c1", "C1CC2CCC1C2", "c1ccc2c(c1)[CH]c1ccccc12", "C1=CC=CC=C1", "OC1CCCC1"]:
+            molecule = Molecule().from_smiles(smiles)
+            molecule_module._ring_perception_cache.clear()
+            fresh = [[molecule.vertices.index(atom) for atom in ring]
+                     for ring in molecule.get_smallest_set_of_smallest_rings()]
+            fresh_symm = [[molecule.vertices.index(atom) for atom in ring]
+                          for ring in molecule.get_smallest_set_of_smallest_rings(symmetrized=True)]
+            # A copy (same atom order and structure) gets the rings from the cache
+            copy = molecule.copy(deep=True)
+            assert copy._sssr is None
+            cached = [[copy.vertices.index(atom) for atom in ring]
+                      for ring in copy.get_smallest_set_of_smallest_rings()]
+            cached_symm = [[copy.vertices.index(atom) for atom in ring]
+                           for ring in copy.get_smallest_set_of_smallest_rings(symmetrized=True)]
+            assert cached == fresh
+            assert cached_symm == fresh_symm
+
+    def test_key_depends_on_structure(self):
+        from rmgpy.molecule import Molecule
+        molecule1 = Molecule().from_smiles("C1CCCCC1")
+        molecule2 = Molecule().from_smiles("[CH]1CCCCC1")
+        assert molecule1._ring_perception_key(False) != molecule2._ring_perception_key(False)
+        assert molecule1._ring_perception_key(False) != molecule1._ring_perception_key(True)
+        # Resonance structures that only differ in bond orders have the same key
+        kekule = Molecule().from_smiles("C1=CC=CC=C1")
+        other = kekule.copy(deep=True)
+        for bond in other.get_all_edges():
+            if bond.is_double():
+                bond.decrement_order()
+            elif bond.is_single() and bond.atom1.is_carbon() and bond.atom2.is_carbon():
+                bond.increment_order()
+        assert kekule._ring_perception_key(False) == other._ring_perception_key(False)

@@ -35,7 +35,6 @@ coefficients.
 import logging
 import math
 import warnings
-from copy import deepcopy
 
 import numpy as np
 
@@ -148,7 +147,7 @@ class KineticsGroups(Database):
                     else:
                         r = r.merge(react)
                 else:
-                    r = deepcopy(react)
+                    r = react.copy(deep=True)
 
             atoms = r.get_all_labeled_atoms()
 

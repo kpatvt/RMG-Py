@@ -59,6 +59,8 @@ cdef class Species:
     cdef str _fingerprint
     cdef str _inchi
     cdef str _smiles
+    cdef list _resonance_list
+    cdef tuple _resonance_key
 
     cpdef generate_resonance_structures(self, bint keep_isomorphic=?, bint filter_structures=?, bint save_order=?)
 

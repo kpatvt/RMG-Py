@@ -74,6 +74,35 @@ globals().update({
 })
 
 
+def _copy_props(props):
+    """
+    Return a copy of an atom's `props` dictionary that is as independent as a deep copy.
+
+    The props of an atom usually only hold immutable values (e.g. ``inRing``), in which case a
+    shallow copy suffices and is much faster than ``deepcopy``, which is otherwise one of the
+    main costs of copying a molecule.
+    """
+    if props is None:
+        return None
+    for value in props.values():
+        if not (value is None or isinstance(value, (bool, int, float, str))):
+            return deepcopy(props)
+    return dict(props)
+
+
+# Cache of Atom hash values by element symbol, see Atom.__hash__
+_atom_hashes = {}
+
+
+def _atom_sorting_key(atom):
+    return atom.sorting_key
+
+
+# Rings found by Molecule.get_smallest_set_of_smallest_rings(), as atom indices, by the key of the
+# molecule (see Molecule._ring_perception_key); keys and values hold no references to molecules
+_ring_perception_cache = {}
+_RING_PERCEPTION_CACHE_SIZE = 20000
+
 class Atom(Vertex):
     """
     An atom. The attributes are:
@@ -176,7 +205,13 @@ class Atom(Vertex):
         """
         Define a custom hash method to allow Atom objects to be used in dictionaries and sets.
         """
-        return hash(('Atom', self.element.symbol))
+        # The hash only depends on the element, so it is computed once per element symbol
+        # (atoms are hashed very often, e.g. whenever a bond is added to a vertex's edge dict)
+        symbol = self.element.symbol
+        value = _atom_hashes.get(symbol)
+        if value is None:
+            value = _atom_hashes[symbol] = hash(('Atom', symbol))
+        return value
 
     def __eq__(self, other):
         """Method to test equality of two Atom objects."""
@@ -355,9 +390,11 @@ class Atom(Vertex):
         a.lone_pairs = self.lone_pairs
         a.site = self.site
         a.morphology = self.morphology
-        a.coords = self.coords[:]
+        # The coordinates are shared, which is what the slice this replaced did as well: slicing a
+        # numpy array creates a view of the same data, not a copy
+        a.coords = self.coords
         a.id = self.id
-        a.props = deepcopy(self.props)
+        a.props = _copy_props(self.props)
         return a
 
     def is_electron(self):
@@ -1308,7 +1345,18 @@ class Molecule(Graph):
         covalent bonds with the surface present. If no covalent surface bonds are present,
         all vdW bonds are removed.
         """
-        cython.declare(bond=Bond)
+        cython.declare(bond=Bond, vertex=Vertex, has_vdw=cython.bint)
+        # Most molecules have no vdW bonds, so check for them first
+        has_vdw = False
+        for vertex in self.vertices:
+            for bond in vertex.edges.values():
+                if bond.is_van_der_waals():
+                    has_vdw = True
+                    break
+            if has_vdw:
+                break
+        if not has_vdw:
+            return
         if self.has_covalent_surface_bond():
             return # preserve any vdW bonds if there's also a covalent X
         for bond in self.get_all_edges():
@@ -1330,7 +1378,9 @@ class Molecule(Graph):
             if vertex.sorting_label < 0:
                 self.update_connectivity_values()
                 break
-        self.vertices.sort(reverse=True)
+        # Sorting by the sorting keys gives the same order as comparing the atoms themselves (which
+        # compares their sorting keys), but computes each key once instead of for every comparison
+        self.vertices.sort(key=_atom_sorting_key, reverse=True)
         for index, vertex in enumerate(self.vertices):
             vertex.sorting_label = index
 
@@ -2589,9 +2639,10 @@ class Molecule(Graph):
         """
         Performs ring perception and saves ring membership information to the Atom.props attribute.
         """
-        cython.declare(atom=Atom)
+        cython.declare(atom=Atom, cyclic_ids=set)
+        cyclic_ids = {id(atom) for atom in self.get_all_cyclic_vertices()}
         for atom in self.vertices:
-            atom.props["inRing"] = self.is_vertex_in_cycle(atom)
+            atom.props["inRing"] = id(atom) in cyclic_ids
 
     def count_aromatic_rings(self):
         """
@@ -2748,7 +2799,21 @@ class Molecule(Graph):
         # RDKit does not support electron
         if self.is_electron():
             return []
-        
+
+        # The rings only depend on what is converted to RDKit below (and on the edges, for sorting
+        # the rings), so they are the same for all molecules with the same key, e.g. resonance
+        # structures differing only in bond orders
+        key = self._ring_perception_key(symmetrized)
+        if key is not None:
+            cached_rings = _ring_perception_cache.get(key)
+            if cached_rings is not None:
+                sssr = [[self.vertices[i] for i in ring] for ring in cached_rings]
+                if symmetrized:
+                    self._symm_sssr = tuple(sssr)
+                else:
+                    self._sssr = tuple(sssr)
+                return sssr
+
         from rdkit import Chem
         
         sssr = []
@@ -2779,7 +2844,37 @@ class Molecule(Graph):
             self._symm_sssr = tuple(sssr)
         else:
             self._sssr = tuple(sssr)
+        if key is not None:
+            if len(_ring_perception_cache) >= _RING_PERCEPTION_CACHE_SIZE:
+                _ring_perception_cache.clear()
+            index = {atom: i for i, atom in enumerate(self.vertices)}
+            _ring_perception_cache[key] = tuple([tuple([index[atom] for atom in ring]) for ring in sssr])
         return sssr
+
+    def _ring_perception_key(self, symmetrized):
+        """
+        Return a key describing everything that get_smallest_set_of_smallest_rings() uses to find the
+        rings: for each atom (in order) what is converted to RDKit, and all bonds between atoms (by
+        index, marking hydrogen bonds, which are not converted but are used to sort the rings).
+        Returns ``None`` if the molecule contains other vertices than atoms.
+        """
+        cython.declare(atom=Atom, atoms=list, bonds=list, index=dict, i=cython.int, j=cython.int)
+        atoms = []
+        index = {}
+        for i, atom in enumerate(self.vertices):
+            if type(atom) is not Atom:
+                return None
+            index[atom] = i
+            atoms.append((atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
+                          atom.lone_pairs == 1, atom.label if atom.label in ('R', 'L') else ''))
+        bonds = []
+        for atom in self.vertices:
+            i = index[atom]
+            for neighbor, bond in atom.edges.items():
+                j = index[neighbor]
+                if i < j:
+                    bonds.append((i, j, bond.is_hydrogen_bond()))
+        return (symmetrized, self.multiplicity == 1, tuple(atoms), tuple(bonds))
 
     def get_relevant_cycles(self):
         raise RuntimeError("'get_relevant_cycles' is deprecated. Use get_smallest_set_of_smallest_rings instead.")
@@ -3003,12 +3098,31 @@ class Molecule(Graph):
 
         If ``strict=False``, performs the check ignoring electrons and resonance structures.
         """
-        cython.declare(atom_ids=set, other_ids=set, atom_list=list, other_list=list, mapping=dict)
+        cython.declare(atom_ids=set, other_ids=set, atom_list=list, other_list=list, mapping=dict, other_by_id=dict,
+                       atom=Atom, other_atom=Atom)
         from rmgpy.molecule.fragment import Fragment
 
         if not isinstance(other, (Molecule, Fragment)):
             raise TypeError(
                 'Got a {0} object for parameter "other", when a Molecule object is required.'.format(other.__class__))
+
+        # Fast path when the atom IDs are unique in both molecules (as they normally are): then
+        # pairing up the atoms with the same ID gives the same mapping as the sorted lists below
+        if len(self.vertices) == len(other.vertices):
+            other_by_id = {}
+            for atom in other.vertices:
+                other_by_id[atom.id] = atom
+            if len(other_by_id) == len(other.vertices):
+                mapping = {}
+                for atom in self.vertices:
+                    other_atom = other_by_id.pop(atom.id, None)
+                    if other_atom is None:
+                        # Either the ID is not in other, or it occurs more than once in self; the
+                        # general code below handles both cases
+                        break
+                    mapping[atom] = other_atom
+                else:
+                    return self.is_mapping_valid(other, mapping, equivalent=True, strict=strict)
 
         # Get a set of atom indices for each molecule
         atom_ids = set([atom.id for atom in self.vertices])

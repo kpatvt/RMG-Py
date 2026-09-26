@@ -98,6 +98,10 @@ cdef class Graph(object):
     
     cpdef Graph copy(self, bint deep=?)
 
+    cdef list _deep_copy_into(self, Graph other)
+
+    cdef list _topology_copy_into(self, Graph other)
+
     cpdef dict copy_and_map(self)
 
     cpdef Graph merge(self, Graph other)
@@ -114,9 +118,13 @@ cdef class Graph(object):
 
     cpdef list find_isomorphism(self, Graph other, dict initial_map=?, bint save_order=?, bint strict=?)
 
+    cpdef dict find_first_isomorphism(self, Graph other, dict initial_map=?, bint save_order=?, bint strict=?)
+
     cpdef bint is_subgraph_isomorphic(self, Graph other, dict initial_map=?, bint save_order=?) except -2
 
     cpdef list find_subgraph_isomorphisms(self, Graph other, dict initial_map=?, bint save_order=?)
+
+    cpdef set _find_bridges(self, list roots)
 
     cpdef bint is_cyclic(self) except -2
 
@@ -140,6 +148,10 @@ cdef class Graph(object):
     
     cpdef list get_largest_ring(self, Vertex vertex)
     
+    cdef bint _is_simple_mapping(self, Graph other, dict mapping)
+
+    cdef bint _are_mapped_edges_valid(self, Graph other, dict mapping, bint equivalent, bint strict) except -2
+
     cpdef bint is_mapping_valid(self, Graph other, dict mapping, bint equivalent=?, bint strict=?) except -2
 
     cpdef list get_edges_in_cycle(self, list vertices, bint sort=?)

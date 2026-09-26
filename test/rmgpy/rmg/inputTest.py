@@ -556,6 +556,19 @@ class TestWriterConfig:
         assert cfg.save_interval == 1
         assert cfg.save_edge is None
 
+    def test_options_writer_defaults(self):
+        """By default Chemkin files are written every iteration and the RMS YAML file at the end"""
+        rmg = RMG()
+        inp.set_global_rmg(rmg)
+        inp.options()
+        assert rmg.chemkin_writer_config.save_interval == 1
+        assert rmg.rms_writer_config.save_interval == -1
+        inp.options(generateRMSYAML={'saveInterval': 1})
+        assert rmg.rms_writer_config.save_interval == 1
+        # The end-of-run default survives writing the options back into an input file
+        assert _parse_writer_config(eval(_writer_config_to_input(WriterConfig(save_interval=-1))),
+                                    default_save_interval=-1).save_interval == -1
+
     def test_parse_true_custom_default_interval(self):
         cfg = _parse_writer_config(True, default_save_interval=5)
         assert cfg.save_interval == 5

@@ -81,6 +81,10 @@ cdef class ReactionSystem(DASx):
 
     cdef public np.ndarray network_leak_rates    
 
+    # The core species concentrations of the last residual evaluation, if the edge rates still need to be
+    # calculated from them (see update_edge_rates)
+    cdef public np.ndarray edge_rate_concentrations
+
     # variables that cache maximum rate (ratio) data
     cdef public np.ndarray max_edge_species_rate_ratios
     cdef public np.ndarray max_network_leak_rate_ratios
@@ -123,6 +127,8 @@ cdef class ReactionSystem(DASx):
         list edge_reactions,list surface_species, list surface_reactions,
         list pdep_networks=?, bool prune=?, bool sensitivity=?, list sens_worksheet=?, object model_settings=?,
         object simulator_settings=?, dict conditions=?)
+
+    cpdef update_edge_rates(self)
 
     cpdef log_rates(self, double char_rate, object species, double species_rate, double max_dif_ln_accum_num, object network, double network_rate)
      

@@ -106,12 +106,15 @@ def to_rdkit_mol(mol, remove_h=True, return_mapping=False, sanitize=True,
               'H': rd_bonds.HYDROGEN, 'R': rd_bonds.UNSPECIFIED,
               None: rd_bonds.UNSPECIFIED}
     # Add the bonds
+    atom_indices = {}
+    for index, atom in enumerate(atoms):
+        atom_indices.setdefault(atom, index)
     for atom1 in mol.vertices:
         for atom2, bond in atom1.edges.items():
             if bond.is_hydrogen_bond():
                 continue
-            index1 = atoms.index(atom1)
-            index2 = atoms.index(atom2)
+            index1 = atom_indices[atom1]
+            index2 = atom_indices[atom2]
             if index1 < index2:
                 if ignore_bond_orders:
                     order = rd_bonds.UNSPECIFIED

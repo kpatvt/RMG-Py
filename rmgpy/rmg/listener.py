@@ -31,7 +31,6 @@ import csv
 import os
 
 from rmgpy.chemkin import get_species_identifier
-from rmgpy.tools.plot import SimulationPlot
 
 
 class SimulationProfileWriter(object):
@@ -147,4 +146,6 @@ class SimulationProfilePlotter(object):
             )
         )
 
+        # Imported here, since importing matplotlib takes a quarter of a second
+        from rmgpy.tools.plot import SimulationPlot
         SimulationPlot(csv_file=csv_file, num_species=10, ylabel='Moles').plot(png_file)

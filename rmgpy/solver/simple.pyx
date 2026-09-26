@@ -265,9 +265,24 @@ cdef class SimpleReactor(ReactionSystem):
         and (effective) pressure of the reaction system.
         """
 
+        # Compute the effective pressures as calculate_effective_pressure() does, without searching
+        # the pressure-dependent reactions with collider efficiencies for each reaction
+        y0_core_species = self.y0[:self.num_core_species]
+        sum_core_species = np.sum(y0_core_species)
+        collision_indices = {}
+        for i in range(self.pdep_collision_reaction_indices.shape[0]):
+            collision_indices.setdefault(int(self.pdep_collision_reaction_indices[i]), i)
+
         for rxn in itertools.chain(core_reactions, edge_reactions):
             j = self.reaction_index[rxn]
-            Peff = self.calculate_effective_pressure(rxn)
+            i = collision_indices.get(j, -1)
+            if i < 0:
+                Peff = self.P.value_si
+            elif rxn.specific_collider is None:
+                Peff = self.P.value_si * np.sum(self.collider_efficiencies[i] * y0_core_species / sum_core_species)
+            else:
+                logging.debug("Calculating Peff using {0} as a specific_collider".format(rxn.specific_collider))
+                Peff = self.P.value_si * self.y0[self.species_index[rxn.specific_collider]] / sum_core_species
             self.kf[j] = rxn.get_rate_coefficient(self.T.value_si, Peff)
 
             if rxn.reversible:
@@ -361,11 +376,11 @@ cdef class SimpleReactor(ReactionSystem):
         cdef np.ndarray[np.float64_t, ndim=1] res, kf, kr, knet, delta, equilibrium_constants
         cdef Py_ssize_t num_core_species, num_core_reactions, num_edge_species, num_edge_reactions, num_pdep_networks
         cdef Py_ssize_t i, j, z, first, second, third
-        cdef double k, V, reaction_rate, rev_reaction_rate, T, P, Peff
+        cdef double k, V, reaction_rate, f_reaction_rate, rev_reaction_rate, T, P, Peff
         cdef np.ndarray[np.float64_t, ndim=1] core_species_concentrations, core_species_rates, core_reaction_rates
-        cdef np.ndarray[np.float64_t, ndim=1] edge_species_rates, edge_reaction_rates, network_leak_rates
+        cdef np.ndarray[np.float64_t, ndim=1] network_leak_rates
         cdef np.ndarray[np.float64_t, ndim=1] core_species_consumption_rates, core_species_production_rates
-        cdef np.ndarray[np.float64_t, ndim=1] C, y_core_species
+        cdef np.ndarray[np.float64_t, ndim=1] C, y_core_species, effective_pressures
         cdef np.ndarray[np.float64_t, ndim=2] jacobian, dgdk, collider_efficiencies
         cdef np.ndarray[np.int_t, ndim=1] pdep_collider_reaction_indices, pdep_specific_collider_reaction_indices
         cdef list pdep_collider_kinetics, pdep_specific_collider_kinetics
@@ -391,11 +406,12 @@ cdef class SimpleReactor(ReactionSystem):
             pdep_collider_reaction_indices = self.pdep_collision_reaction_indices
             pdep_collider_kinetics = self.pdep_collider_kinetics
             collider_efficiencies = self.collider_efficiencies
+            # Calculate the effective pressures of all these reactions at once, which avoids two
+            # numpy calls per reaction in every residual evaluation
+            effective_pressures = P * np.sum(collider_efficiencies * y_core_species / np.sum(y_core_species), axis=1)
             for i in range(pdep_collider_reaction_indices.shape[0]):
-                # Calculate effective pressure
-                Peff = P * np.sum(collider_efficiencies[i] * y_core_species / np.sum(y_core_species))
                 j = pdep_collider_reaction_indices[i]
-                kf[j] = pdep_collider_kinetics[i].get_rate_coefficient(T, Peff)
+                kf[j] = pdep_collider_kinetics[i].get_rate_coefficient(T, effective_pressures[i])
                 kr[j] = kf[j] / equilibrium_constants[j]
         if self.pdep_specific_collider_reaction_indices.shape[0] != 0:
             T = self.T.value_si
@@ -405,14 +421,14 @@ cdef class SimpleReactor(ReactionSystem):
             pdep_specific_collider_kinetics = self.pdep_specific_collider_kinetics
             specific_collider_species = self.specific_collider_species
             for i in range(pdep_specific_collider_reaction_indices.shape[0]):
+                j = pdep_specific_collider_reaction_indices[i]
                 if len(y) > self.species_index[specific_collider_species[i]]:
                     # Calculate the effective pressure
                     Peff = P * y[self.species_index[specific_collider_species[i]]] / np.sum(y_core_species)
-                    j = pdep_specific_collider_reaction_indices[i]
                     kf[j] = pdep_specific_collider_kinetics[i].get_rate_coefficient(T, Peff)
                 else:
                     kf[j] = 0
-            kr[j] = kf[j] / equilibrium_constants[j]
+                kr[j] = kf[j] / equilibrium_constants[j]
 
         inet = self.network_indices
         knet = self.network_leak_coefficients
@@ -424,8 +440,6 @@ cdef class SimpleReactor(ReactionSystem):
         core_reaction_rates = np.zeros_like(self.core_reaction_rates)
         core_species_consumption_rates = np.zeros_like(self.core_species_consumption_rates)
         core_species_production_rates = np.zeros_like(self.core_species_production_rates)
-        edge_species_rates = np.zeros_like(self.edge_species_rates)
-        edge_reaction_rates = np.zeros_like(self.edge_reaction_rates)
         network_leak_rates = np.zeros_like(self.network_leak_rates)
 
         C = np.zeros_like(self.core_species_concentrations)
@@ -438,7 +452,10 @@ cdef class SimpleReactor(ReactionSystem):
             C[j] = y[j] / V
             core_species_concentrations[j] = C[j]
 
-        for j in range(ir.shape[0]):
+        # Only the core reactions are needed to evaluate the residual. The edge reaction and species
+        # rates are only needed after each step, so they are calculated from the concentrations of
+        # the last residual evaluation by update_edge_rates()
+        for j in range(num_core_reactions):
             k = kf[j]
             if ir[j, 0] >= num_core_species or ir[j, 1] >= num_core_species or ir[j, 2] >= num_core_species:
                 f_reaction_rate = 0.0
@@ -497,31 +514,6 @@ cdef class SimpleReactor(ReactionSystem):
                         core_species_production_rates[third] += f_reaction_rate
                         core_species_consumption_rates[third] += rev_reaction_rate
 
-            else:
-                # The reaction is an edge reaction
-                edge_reaction_rates[j - num_core_reactions] = reaction_rate
-
-                # Add/substract the total reaction rate from each species rate
-                # Since it's an edge reaction its reactants and products could
-                # be either core or edge species
-                # We're only interested in the edge species
-                first = ir[j, 0]
-                if first >= num_core_species: edge_species_rates[first - num_core_species] -= reaction_rate
-                second = ir[j, 1]
-                if second != -1:
-                    if second >= num_core_species: edge_species_rates[second - num_core_species] -= reaction_rate
-                    third = ir[j, 2]
-                    if third != -1:
-                        if third >= num_core_species: edge_species_rates[third - num_core_species] -= reaction_rate
-                first = ip[j, 0]
-                if first >= num_core_species: edge_species_rates[first - num_core_species] += reaction_rate
-                second = ip[j, 1]
-                if second != -1:
-                    if second >= num_core_species: edge_species_rates[second - num_core_species] += reaction_rate
-                    third = ip[j, 2]
-                    if third != -1:
-                        if third >= num_core_species: edge_species_rates[third - num_core_species] += reaction_rate
-
         for j in range(inet.shape[0]):
             if inet[j, 0] != -1: #all source species are in the core
                 k = knet[j]
@@ -544,8 +536,7 @@ cdef class SimpleReactor(ReactionSystem):
         self.core_species_production_rates = core_species_production_rates
         self.core_species_consumption_rates = core_species_consumption_rates
         self.core_reaction_rates = core_reaction_rates
-        self.edge_species_rates = edge_species_rates
-        self.edge_reaction_rates = edge_reaction_rates
+        self.edge_rate_concentrations = C
         self.network_leak_rates = network_leak_rates
 
         res = core_species_rates * V
