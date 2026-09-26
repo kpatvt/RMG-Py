@@ -444,6 +444,11 @@ def mark_unreactive_structures(filtered_list, mol_list, save_order=False):
     # sort all structures in filtered_list so that the reactive ones are first
     filtered_list.sort(key=lambda mol: mol.reactive, reverse=True)
 
+    if filtered_list and filtered_list[0] is mol_list[0]:
+        # The original structure is already first (the loop below would find that it is isomorphic
+        # to itself and leave the list unchanged)
+        return
+
     # Make sure that the (first) original structure is always first in the list (unless it was filtered out).
     # Important whenever Species.molecule[0] is expected to be used (e.g., training reactions) after generating
     # resonance structures. However, if it was filtered out, it should be appended to the end of the list.
