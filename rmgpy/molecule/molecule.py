@@ -98,6 +98,11 @@ def _atom_sorting_key(atom):
     return atom.sorting_key
 
 
+# Rings found by Molecule.get_smallest_set_of_smallest_rings(), as atom indices, by the key of the
+# molecule (see Molecule._ring_perception_key); keys and values hold no references to molecules
+_ring_perception_cache = {}
+_RING_PERCEPTION_CACHE_SIZE = 20000
+
 class Atom(Vertex):
     """
     An atom. The attributes are:
@@ -2794,7 +2799,21 @@ class Molecule(Graph):
         # RDKit does not support electron
         if self.is_electron():
             return []
-        
+
+        # The rings only depend on what is converted to RDKit below (and on the edges, for sorting
+        # the rings), so they are the same for all molecules with the same key, e.g. resonance
+        # structures differing only in bond orders
+        key = self._ring_perception_key(symmetrized)
+        if key is not None:
+            cached_rings = _ring_perception_cache.get(key)
+            if cached_rings is not None:
+                sssr = [[self.vertices[i] for i in ring] for ring in cached_rings]
+                if symmetrized:
+                    self._symm_sssr = tuple(sssr)
+                else:
+                    self._sssr = tuple(sssr)
+                return sssr
+
         from rdkit import Chem
         
         sssr = []
@@ -2825,7 +2844,37 @@ class Molecule(Graph):
             self._symm_sssr = tuple(sssr)
         else:
             self._sssr = tuple(sssr)
+        if key is not None:
+            if len(_ring_perception_cache) >= _RING_PERCEPTION_CACHE_SIZE:
+                _ring_perception_cache.clear()
+            index = {atom: i for i, atom in enumerate(self.vertices)}
+            _ring_perception_cache[key] = tuple([tuple([index[atom] for atom in ring]) for ring in sssr])
         return sssr
+
+    def _ring_perception_key(self, symmetrized):
+        """
+        Return a key describing everything that get_smallest_set_of_smallest_rings() uses to find the
+        rings: for each atom (in order) what is converted to RDKit, and all bonds between atoms (by
+        index, marking hydrogen bonds, which are not converted but are used to sort the rings).
+        Returns ``None`` if the molecule contains other vertices than atoms.
+        """
+        cython.declare(atom=Atom, atoms=list, bonds=list, index=dict, i=cython.int, j=cython.int)
+        atoms = []
+        index = {}
+        for i, atom in enumerate(self.vertices):
+            if type(atom) is not Atom:
+                return None
+            index[atom] = i
+            atoms.append((atom.element.symbol, atom.element.isotope, atom.radical_electrons, atom.charge,
+                          atom.lone_pairs == 1, atom.label if atom.label in ('R', 'L') else ''))
+        bonds = []
+        for atom in self.vertices:
+            i = index[atom]
+            for neighbor, bond in atom.edges.items():
+                j = index[neighbor]
+                if i < j:
+                    bonds.append((i, j, bond.is_hydrogen_bond()))
+        return (symmetrized, self.multiplicity == 1, tuple(atoms), tuple(bonds))
 
     def get_relevant_cycles(self):
         raise RuntimeError("'get_relevant_cycles' is deprecated. Use get_smallest_set_of_smallest_rings instead.")
