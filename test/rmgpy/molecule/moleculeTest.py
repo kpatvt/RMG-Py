@@ -3479,3 +3479,27 @@ multiplicity 2
         assert mol.get_ring_count_in_largest_fused_ring_system() == 2
         mol = Molecule(smiles="C[C]1C2C(=O)C3CC4C(=O)C=C2CC143")
         assert mol.get_ring_count_in_largest_fused_ring_system() == 4
+
+
+class TestFindFirstIsomorphism:
+    """find_first_isomorphism returns one valid mapping without enumerating all of them"""
+
+    def test_find_first_isomorphism(self):
+        from rmgpy.molecule import Molecule
+        molecule1 = Molecule().from_smiles("CC(C)C")
+        molecule2 = Molecule().from_smiles("CC(C)C")
+        mapping = molecule1.find_first_isomorphism(molecule2)
+        assert mapping is not None
+        assert len(mapping) == len(molecule1.atoms)
+        assert set(mapping.values()) == set(molecule2.atoms)
+        assert molecule1.is_mapping_valid(molecule2, mapping, equivalent=True)
+        assert mapping in molecule1.find_isomorphism(molecule2)
+        assert molecule1.find_first_isomorphism(Molecule().from_smiles("CCCC")) is None
+        # An initial mapping is respected
+        carbon1 = [atom for atom in molecule1.atoms if atom.is_carbon() and len(atom.edges) == 4 and
+                   sum(1 for a in atom.edges if a.is_carbon()) == 1][0]
+        carbons2 = [atom for atom in molecule2.atoms if atom.is_carbon() and
+                    sum(1 for a in atom.edges if a.is_carbon()) == 1]
+        for carbon2 in carbons2:
+            mapping = molecule1.find_first_isomorphism(molecule2, initial_map={carbon1: carbon2})
+            assert mapping[carbon1] is carbon2

@@ -594,6 +594,20 @@ cdef class Graph(object):
         """
         return vf2.find_isomorphism(self, other, initial_map, save_order=save_order, strict=strict)
 
+    cpdef dict find_first_isomorphism(self, Graph other, dict initial_map=None, bint save_order=False, bint strict=True):
+        """
+        Return the first isomorphism mapping (a dict from the vertices of this graph to those of
+        `other`) found by the VF2 algorithm, or ``None`` if the graphs are not isomorphic. Unlike
+        :meth:`find_isomorphism`, this does not enumerate all mappings, which can be very many for
+        symmetric graphs.
+
+        Args:
+            initial_map (dict, optional): initial atom mapping to use
+            save_order (bool, optional):  if ``True``, reset atom order after performing atom isomorphism
+            strict (bool, optional):     if ``False``, perform isomorphism ignoring electrons
+        """
+        return vf2.find_first_isomorphism(self, other, initial_map, save_order=save_order, strict=strict)
+
     cpdef bint is_subgraph_isomorphic(self, Graph other, dict initial_map=None, bint save_order=False) except -2:
         """
         Returns :data:`True` if `other` is subgraph isomorphic and :data:`False`

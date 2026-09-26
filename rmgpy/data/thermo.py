@@ -118,6 +118,10 @@ SIDT_TAGGINGS_AND_DECOMPOSITIONS = {
 }
 
 
+# The maximum number of molecules for which ThermoDatabase._descend_ring_tree() keeps results
+# (keeping many molecules alive slows down garbage collection)
+_RING_DESCEND_CACHE_SIZE = 1000
+
 
 def save_entry(f, entry):
     """
@@ -2641,6 +2645,54 @@ class ThermoDatabase(object):
 
         return estimated_bicyclic_thermo_data
 
+    def _descend_ring_tree(self, ring_database, molecule, ring):
+        """
+        Return the nodes of the ring or polycyclic tree `ring_database` that `molecule` matches with
+        each atom of `ring` labeled in turn, i.e. ``ring_database.descend_tree(molecule, {'*': atom})``.
+
+        The same (saturated) molecules are corrected for their rings again and again, e.g. once for
+        each radical derived from them, and descending these trees is expensive. The node matched
+        for an atom only depends on the structure of the molecule (and its atom labels), so the
+        results are cached for each atom of a copy of the molecule, and looked up for an isomorphic
+        molecule through an isomorphism that also maps each atom to one with the same label.
+        """
+        if type(molecule) is not Molecule:
+            return [ring_database.descend_tree(molecule, {'*': atom}) for atom in ring]
+        cache = self.__dict__.setdefault('_ring_descend_cache', {})
+        key = (id(ring_database), molecule.fingerprint, molecule.multiplicity, len(molecule.atoms),
+               tuple(sorted([atom.label for atom in molecule.atoms if atom.label])))
+        record = None
+        mapping = None
+        for candidate in cache.get(key, ()):
+            if candidate[0] is not ring_database:
+                continue
+            candidate_mapping = molecule.find_first_isomorphism(candidate[1], strict=True)
+            if candidate_mapping is not None and all(atom.label == other.label
+                                                     for atom, other in candidate_mapping.items()):
+                record = candidate
+                mapping = candidate_mapping
+                break
+        if record is None:
+            if sum(len(records) for records in cache.values()) >= _RING_DESCEND_CACHE_SIZE:
+                cache.clear()
+            copy = molecule.copy(deep=True)
+            mapping = dict(zip(molecule.atoms, copy.atoms))
+            record = (ring_database, copy, {})
+            cache.setdefault(key, []).append(record)
+        results = record[2]
+        entries = []
+        for atom in ring:
+            target = mapping[atom]
+            if target in results:
+                entry = results[target]
+                # Descending the tree would sort the atoms of the molecule (as the isomorphism check
+                # above already did), so that later steps see the same atom order
+                molecule.sort_vertices()
+            else:
+                entry = results[target] = ring_database.descend_tree(molecule, {'*': atom})
+            entries.append(entry)
+        return entries
+
     def _add_ring_correction_thermo_data_from_tree(self, thermo_data, ring_database, molecule, ring):
         """
         Determine the ring correction group additivity thermodynamic data for the given
@@ -2648,13 +2700,9 @@ class ThermoDatabase(object):
         `thermo_data`.
         Also returns the matched ring group from the database from which the data originated.
         """
-        matched_ring_entries = []
         # label each atom in the ring individually to try to match the group
         # for each ring, save only the ring that is matches the most specific leaf in the tree.
-        for atom in ring:
-            atoms = {'*': atom}
-            entry = ring_database.descend_tree(molecule, atoms)
-            matched_ring_entries.append(entry)
+        matched_ring_entries = self._descend_ring_tree(ring_database, molecule, ring)
 
         if not matched_ring_entries:
             raise KeyError('Node not found in database.')
