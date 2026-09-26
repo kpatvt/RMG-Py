@@ -450,7 +450,7 @@ cdef class LiquidReactor(ReactionSystem):
 
 
             else:  # three reactants!! (really?)
-                if (ir[j, 0] == ir[j, 1] & ir[j, 0] == ir[j, 2]):
+                if ir[j, 0] == ir[j, 1] and ir[j, 0] == ir[j, 2]:
                     deriv = 3 * k * C[ir[j, 0]] * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 0]] -= 3 * deriv
 
@@ -613,7 +613,7 @@ cdef class LiquidReactor(ReactionSystem):
 
 
             else:  # three products
-                if (ip[j, 0] == ip[j, 1] & ip[j, 0] == ip[j, 2]):
+                if ip[j, 0] == ip[j, 1] and ip[j, 0] == ip[j, 2]:
                     deriv = 3 * k * C[ip[j, 0]] * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 0]] -= 3 * deriv
 

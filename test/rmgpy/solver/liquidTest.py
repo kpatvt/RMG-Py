@@ -31,6 +31,8 @@ import os
 
 import numpy as np
 
+import rmgpy
+from rmgpy.chemkin import load_chemkin_file
 from rmgpy.kinetics import Arrhenius
 from rmgpy.molecule import Molecule
 from rmgpy.reaction import Reaction
@@ -380,6 +382,45 @@ class LiquidReactorTest:
                         assert abs(jacobian[i, j] - solver_jacobian[i, j]) <= abs(
                             1e-4 * jacobian[i, j]
                         )
+
+    def test_jacobian_repeated_reactants(self):
+        """
+        Test the analytical Jacobian against finite differences of the residual for reactions with one, two and
+        three reactants and products, with every pattern of repeated species. For three species (a, b, c), the
+        case a == c != b was once treated as three identical species when the bits of a were a subset of those
+        of b, e.g. for the species indices (1, 3, 1) and (2, 3, 2).
+        """
+        folder = os.path.join(os.path.dirname(rmgpy.__file__), "solver", "files", "collider_model")
+        species_list = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                         os.path.join(folder, "species_dictionary.txt"))[0][:6]
+        units = {1: "s^-1", 2: "cm^3/(mol*s)", 3: "cm^6/(mol^2*s)"}
+        patterns = [(0,), (0, 1), (1, 1), (0, 1, 2), (0, 0, 0), (0, 0, 1), (0, 1, 1), (1, 0, 1), (1, 3, 1),
+                    (2, 3, 2), (3, 1, 1), (1, 1, 3), (3, 1, 3), (5, 4, 5)]
+        for pattern in patterns:
+            for reactants, products in ((pattern, (4,)), (pattern, (4, 5)), ((4,), pattern), ((4, 5), pattern)):
+                reaction = Reaction(reactants=[species_list[i] for i in reactants],
+                                    products=[species_list[i] for i in products],
+                                    kinetics=Arrhenius(A=(1.0, units[len(reactants)]), n=0, Ea=(0, "kJ/mol"),
+                                                       T0=(1, "K")))
+                rxn_system = LiquidReactor(1000, initial_concentrations={species_list[0]: 12.0}, n_sims=1,
+                                           termination=None)
+                rxn_system.initialize_model(species_list, [reaction], [], [])
+                # Rate coefficients that give rates of similar magnitude in both directions
+                rxn_system.kf[0] = 0.7 * 12.0 ** (1 - len(reactants))
+                rxn_system.kb[0] = 0.3 * 12.0 ** (1 - len(products))
+                n = len(species_list)
+                y = 0.2 + np.random.default_rng(0).random(n)
+                dydt = np.zeros(n)
+                jacobian = rxn_system.jacobian(0.0, y, dydt, 0.0)
+                for i in range(n):
+                    h = 1e-6 * y[i]
+                    y_plus = y.copy()
+                    y_plus[i] += h
+                    y_minus = y.copy()
+                    y_minus[i] -= h
+                    column = (rxn_system.residual(0.0, y_plus, dydt)[0]
+                              - rxn_system.residual(0.0, y_minus, dydt)[0]) / (2 * h)
+                    assert np.allclose(jacobian[:, i], column, rtol=1e-5, atol=1e-8), (reactants, products, i)
 
     def test_compute_derivative(self):
         rxn_list = [

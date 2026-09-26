@@ -931,7 +931,7 @@ cdef class SimpleReactor(ReactionSystem):
 
             else:  # three reactants
                 corr = - 2 * k * C[ir[j, 0]] * C[ir[j, 1]] * C[ir[j, 2]] / Ctot
-                if (ir[j, 0] == ir[j, 1] & ir[j, 0] == ir[j, 2]):
+                if ir[j, 0] == ir[j, 1] and ir[j, 0] == ir[j, 2]:
                     deriv = 3 * k * C[ir[j, 0]] * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 0]] -= 3 * deriv
                     for i in range(num_core_species):
@@ -1158,7 +1158,7 @@ cdef class SimpleReactor(ReactionSystem):
 
             else:  # three reactants
                 corr = - 2 * k * C[ip[j, 0]] * C[ip[j, 1]] * C[ip[j, 2]] / Ctot
-                if (ip[j, 0] == ip[j, 1] & ip[j, 0] == ip[j, 2]):
+                if ip[j, 0] == ip[j, 1] and ip[j, 0] == ip[j, 2]:
                     deriv = 3 * k * C[ip[j, 0]] * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 0]] -= 3 * deriv
                     for i in range(num_core_species):
