@@ -624,6 +624,46 @@ class SimpleReactorTest:
         for i in range(len(simulated_mole_fracs)):
             assert round(abs(simulated_mole_fracs[i] - expected_mole_fracs[i]), 7) == 0
 
+    def test_pairwise_sum(self):
+        """
+        Test that pairwise_sum(), which the residual uses instead of np.sum(), rounds exactly as np.sum() does.
+        """
+        from rmgpy.solver.simple import pairwise_sum
+
+        rng = np.random.default_rng(0)
+        for n in list(range(0, 300)) + [511, 512, 513, 1000, 4099]:
+            for scale in (rng.random(n), 10.0 ** rng.integers(-30, 5, n), rng.standard_normal(n) * 1e10):
+                values = rng.random(n) * scale
+                assert pairwise_sum(values) == np.sum(values)
+
+    def test_collider_rate_coefficients(self):
+        """
+        Test that the residual sets the rate coefficients of reactions with collision efficiencies to those of
+        their kinetics at the effective pressure, also after the temperature of the reactor changes (the parts of
+        these rate coefficients that only depend on the temperature are calculated once per temperature).
+        """
+        from rmgpy.quantity import Quantity
+
+        folder = os.path.join(os.path.dirname(rmgpy.__file__), "solver", "files", "collider_model")
+        species_list, reaction_list = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                                        os.path.join(folder, "species_dictionary.txt"))
+        initial_mole_fractions = {species_list[0]: 0.3, species_list[1]: 0.2, species_list[-1]: 0.5}
+        rxn_system = SimpleReactor(1000, 1e5, initial_mole_fractions=initial_mole_fractions, n_sims=1,
+                                   termination=None)
+        rxn_system.initialize_model(species_list, reaction_list, [], [])
+        assert "Troe" in set(type(kinetics).__name__ for kinetics in rxn_system.pdep_collider_kinetics)
+
+        rng = np.random.default_rng(1)
+        for T in (1000, 1000, 1500, 800):
+            rxn_system.T = Quantity(T, "K")
+            y = rng.random(len(species_list))
+            rxn_system.residual(0.0, y, np.zeros(len(species_list)))
+            for i, j in enumerate(rxn_system.pdep_collision_reaction_indices):
+                P_eff = 1e5 * np.sum(rxn_system.collider_efficiencies[i] * y / np.sum(y))
+                k = rxn_system.pdep_collider_kinetics[i].get_rate_coefficient(T, P_eff)
+                assert rxn_system.kf[j] == k
+                assert rxn_system.kb[j] == k / rxn_system.Keq[j]
+
     def test_specific_collider_model(self):
         """
         Test the solver's ability to simulate a model with specific third body species collision efficiencies.

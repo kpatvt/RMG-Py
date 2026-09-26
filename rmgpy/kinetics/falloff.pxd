@@ -37,6 +37,10 @@ cdef class ThirdBody(PDepKineticsModel):
     
     cpdef double get_rate_coefficient(self, double T, double P=?) except -1
 
+    cdef int get_temperature_terms(self, double T, double * terms) except -1
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1
+
     cpdef bint is_identical_to(self, KineticsModel other_kinetics) except -2
     
     cpdef change_rate(self, double factor)
@@ -49,6 +53,10 @@ cdef class Lindemann(PDepKineticsModel):
     cdef public Arrhenius arrheniusLow
     
     cpdef double get_rate_coefficient(self, double T, double P=?) except -1
+
+    cdef int get_temperature_terms(self, double T, double * terms) except -1
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1
 
     cpdef bint is_identical_to(self, KineticsModel other_kinetics) except -2
     
@@ -64,6 +72,10 @@ cdef class Troe(PDepKineticsModel):
     cdef public ScalarQuantity _T1, _T2, _T3
     
     cpdef double get_rate_coefficient(self, double T, double P=?) except -1
+
+    cdef int get_temperature_terms(self, double T, double * terms) except -1
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1
 
     cpdef bint is_identical_to(self, KineticsModel other_kinetics) except -2
     
