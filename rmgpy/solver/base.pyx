@@ -32,6 +32,7 @@ systems.
 
 cdef extern from "math.h":
     double sqrt(double)
+    double fabs(double)
 
 import csv
 import itertools
@@ -58,6 +59,181 @@ from rmgpy.quantity import Quantity
 from rmgpy.species import Species
 from rmgpy.solver.termination import TerminationTime, TerminationConversion, TerminationRateRatio
 ################################################################################
+
+cdef double pairwise_sum(double * a, Py_ssize_t n) noexcept nogil:
+    """
+    Return the sum of the `n` values starting at `a`, rounded exactly as ``np.sum()`` rounds it (numpy's
+    pairwise summation: blocks of up to 128 values are summed with eight partial sums, and longer ranges are
+    split in two), so that replacing ``np.sum()`` by this function does not change any result.
+    """
+    cdef Py_ssize_t i, n2
+    cdef double res, r0, r1, r2, r3, r4, r5, r6, r7
+    if n < 8:
+        res = 0.
+        for i in range(n):
+            res += a[i]
+        return res
+    elif n <= 128:
+        r0 = a[0]
+        r1 = a[1]
+        r2 = a[2]
+        r3 = a[3]
+        r4 = a[4]
+        r5 = a[5]
+        r6 = a[6]
+        r7 = a[7]
+        i = 8
+        while i < n - (n % 8):
+            r0 += a[i]
+            r1 += a[i + 1]
+            r2 += a[i + 2]
+            r3 += a[i + 3]
+            r4 += a[i + 4]
+            r5 += a[i + 5]
+            r6 += a[i + 6]
+            r7 += a[i + 7]
+            i += 8
+        res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
+        while i < n:
+            res += a[i]
+            i += 1
+        return res
+    else:
+        n2 = n // 2
+        n2 -= n2 % 8
+        return pairwise_sum(a, n2) + pairwise_sum(a + n2, n - n2)
+
+
+cdef np.ndarray zeros_array(Py_ssize_t n):
+    """
+    Return a new array of `n` zeros (like ``np.zeros(n)``, but without the Python call overhead).
+    """
+    cdef np.npy_intp dims[1]
+    dims[0] = n
+    return np.PyArray_ZEROS(1, dims, np.NPY_FLOAT64, 0)
+
+
+cdef double _empty_data[1]
+cdef long _empty_indices[1]
+
+
+cdef double * float_data(np.ndarray a, Py_ssize_t n) except NULL:
+    """
+    Return a pointer to the data of the array of floats `a`, after checking that it is a contiguous array of
+    at least `n` values.
+    """
+    if np.PyArray_TYPE(a) != np.NPY_FLOAT64 or not np.PyArray_IS_C_CONTIGUOUS(a):
+        raise ValueError('Expected a contiguous array of floats')
+    if np.PyArray_SIZE(a) < n:
+        raise IndexError('Expected an array of at least {0} values, got {1}'.format(n, np.PyArray_SIZE(a)))
+    if np.PyArray_SIZE(a) == 0:
+        return _empty_data
+    return <double *> np.PyArray_DATA(a)
+
+
+cdef long * int_data(np.ndarray a, Py_ssize_t n) except NULL:
+    """
+    Return a pointer to the data of the array of integers (``np.int_``) `a`, after checking that it is a contiguous
+    array of at least `n` values. For a two-dimensional array of reactant or product indices, `n` must be three
+    times the number of rows used, and the array must have three columns.
+    """
+    if np.PyArray_TYPE(a) != np.NPY_LONG or not np.PyArray_IS_C_CONTIGUOUS(a):
+        raise ValueError('Expected a contiguous array of integers')
+    if a.ndim == 2 and a.shape[1] != 3:
+        raise ValueError('Expected an array of indices with three columns')
+    if np.PyArray_SIZE(a) < n:
+        raise IndexError('Expected an array of at least {0} values, got {1}'.format(n, np.PyArray_SIZE(a)))
+    if np.PyArray_SIZE(a) == 0:
+        return _empty_indices
+    return <long *> np.PyArray_DATA(a)
+
+
+cdef int check_indices(long * indices, Py_ssize_t num_species) except -1:
+    """
+    Check that the three species `indices` of a reaction (or network) refer to core species, as the
+    bounds checks of the arrays indexed by them did: the first index must be valid, and the others valid or -1.
+    """
+    if indices[0] < 0 or indices[0] >= num_species:
+        raise IndexError('Invalid species index {0}'.format(indices[0]))
+    if indices[1] < -1 or indices[1] >= num_species:
+        raise IndexError('Invalid species index {0}'.format(indices[1]))
+    if indices[2] < -1 or indices[2] >= num_species:
+        raise IndexError('Invalid species index {0}'.format(indices[2]))
+    return 0
+
+
+################################################################################
+
+cdef bint has_nan(np.ndarray values) except -1:
+    """
+    Return whether the contiguous array of floats `values` contains a NaN (like ``np.isnan(values).any()``).
+    """
+    cdef Py_ssize_t i, n
+    cdef double * data
+    n = np.PyArray_SIZE(values)
+    data = float_data(values, n)
+    for i in range(n):
+        if data[i] != data[i]:
+            return True
+    return False
+
+
+cdef double root_sum_of_squares(np.ndarray values) except -1:
+    """
+    Return ``sqrt(np.sum(values * values))`` for the contiguous array of floats `values`, rounded exactly as
+    numpy rounds it.
+    """
+    cdef Py_ssize_t i, n
+    cdef double * data
+    cdef double * squares_data
+    cdef np.ndarray squares
+    n = np.PyArray_SIZE(values)
+    data = float_data(values, n)
+    squares = zeros_array(n)
+    squares_data = float_data(squares, n)
+    for i in range(n):
+        squares_data[i] = data[i] * data[i]
+    return sqrt(pairwise_sum(squares_data, n))
+
+
+@cython.cdivision(True)
+cdef np.ndarray absolute_values(np.ndarray values, double divisor):
+    """
+    Return a new array with the absolute values of the contiguous array of floats `values` divided by
+    `divisor` (like ``np.abs(values / divisor)``, also for a divisor of zero), or of the values themselves
+    if `divisor` is 1.
+    """
+    cdef Py_ssize_t i, n
+    cdef double * data
+    cdef double * result_data
+    cdef np.ndarray result
+    n = np.PyArray_SIZE(values)
+    data = float_data(values, n)
+    result = zeros_array(n)
+    result_data = float_data(result, n)
+    if divisor == 1.0:
+        for i in range(n):
+            result_data[i] = fabs(data[i])
+    else:
+        for i in range(n):
+            result_data[i] = fabs(data[i] / divisor)
+    return result
+
+
+cdef list indices_above(np.ndarray values, Py_ssize_t n, double threshold):
+    """
+    Return the indices of the first `n` values of the contiguous array of floats `values` that are greater
+    than `threshold`, in increasing order.
+    """
+    cdef Py_ssize_t i
+    cdef double * data
+    cdef list indices = []
+    data = float_data(values, n)
+    for i in range(n):
+        if data[i] > threshold:
+            indices.append(i)
+    return indices
+
 
 cdef class ReactionSystem(DASx):
     """
@@ -769,7 +945,7 @@ cdef class ReactionSystem(DASx):
             if not first_time:
                 try:
                     self.step(step_time)
-                    if np.isnan(self.y).any():
+                    if has_nan(self.y):
                         raise DASxError("nans in moles")
                 except DASxError as e:
                     logging.error("Trying to step from time {0} to {1} resulted in a solver (DASPK) error: "
@@ -821,7 +997,6 @@ cdef class ReactionSystem(DASx):
                         raise ValueError('invalid_objects could not be filled during resurrection process')
 
             y_core_species = self.y[:num_core_species]
-            total_moles = np.sum(y_core_species)
             if sensitivity:
                 time_array.append(self.t)
                 mole_sens = self.y[num_core_species:]
@@ -843,27 +1018,28 @@ cdef class ReactionSystem(DASx):
                     norm_sens_array[i].append(norm_sens)
 
             snapshot = [self.t, self.V]
-            snapshot.extend(y_core_species)
+            snapshot.extend(y_core_species.tolist())
             self.snapshots.append(snapshot)
 
             # Calculate the edge rates for the state of the last residual evaluation
             self.update_edge_rates()
 
             # Get the characteristic flux
-            char_rate = sqrt(np.sum(self.core_species_rates * self.core_species_rates))
+            char_rate = root_sum_of_squares(self.core_species_rates)
 
             if char_rate > max_char_rate:
                 max_char_rate = char_rate
 
-            core_species_rates = np.abs(self.core_species_rates)
+            # The absolute rates, and the absolute rates relative to the characteristic rate
+            core_species_rates = absolute_values(self.core_species_rates, 1.0)
             edge_reaction_rates = self.edge_reaction_rates
             core_species_consumption_rates = self.core_species_consumption_rates
             core_species_production_rates = self.core_species_production_rates
-            edge_species_rates = np.abs(self.edge_species_rates)
-            network_leak_rates = np.abs(self.network_leak_rates)
-            core_species_rate_ratios = np.abs(self.core_species_rates / char_rate)
-            edge_species_rate_ratios = np.abs(self.edge_species_rates / char_rate)
-            network_leak_rate_ratios = np.abs(self.network_leak_rates / char_rate)
+            edge_species_rates = absolute_values(self.edge_species_rates, 1.0)
+            network_leak_rates = absolute_values(self.network_leak_rates, 1.0)
+            core_species_rate_ratios = absolute_values(self.core_species_rates, char_rate)
+            edge_species_rate_ratios = absolute_values(self.edge_species_rates, char_rate)
+            network_leak_rate_ratios = absolute_values(self.network_leak_rates, char_rate)
             num_edge_reactions = self.num_edge_reactions
             core_reaction_rates = self.core_reaction_rates
             product_indices = self.product_indices
@@ -1086,7 +1262,12 @@ cdef class ReactionSystem(DASx):
             #movement of species to core based on rate ratios
 
             if not ignore_overall_flux_criterion:
-                for ind, obj in enumerate(edge_species):
+                if len(edge_species) > edge_species_rate_ratios.shape[0]:
+                    raise IndexError('There are more edge species than edge species rate ratios')
+                # Only the edge species above one of the two thresholds need to be checked
+                for ind in indices_above(edge_species_rate_ratios, len(edge_species),
+                                         min(tol_move_to_core, tol_interrupt_simulation)):
+                    obj = edge_species[ind]
                     rr = edge_species_rate_ratios[ind]
                     if rr > tol_move_to_core:
                         if not (obj in new_objects or obj in invalid_objects):
@@ -1344,68 +1525,92 @@ cdef class ReactionSystem(DASx):
         this method, which gives the same result as calculating the edge rates in the last residual
         evaluation. It does nothing if there is nothing to calculate.
         """
-        cdef np.ndarray[np.int_t, ndim=2] ir, ip
-        cdef np.ndarray[np.float64_t, ndim=1] kf, kr, C, edge_species_rates, edge_reaction_rates
-        cdef Py_ssize_t j, first, second, third, num_core_species, num_core_reactions
+        cdef np.ndarray C, edge_species_rates, edge_reaction_rates
+        cdef Py_ssize_t j, m, first, second, third, num_core_species, num_core_reactions, num_reactions
+        cdef Py_ssize_t num_edge_species, num_species
         cdef double k, f_reaction_rate, rev_reaction_rate, reaction_rate
+        # Pointers to the data of the arrays, which are checked by float_data() and int_data()
+        cdef long * ir
+        cdef long * ip
+        cdef double * kf
+        cdef double * kr
+        cdef double * Cp
+        cdef double * species_rates
+        cdef double * reaction_rates
 
         if self.edge_rate_concentrations is None:
             return
         C = self.edge_rate_concentrations
         self.edge_rate_concentrations = None
 
-        ir = self.reactant_indices
-        ip = self.product_indices
-        kf = self.kf
-        kr = self.kb
-        num_core_species = len(self.core_species_rates)
-        num_core_reactions = len(self.core_reaction_rates)
-        edge_species_rates = np.zeros_like(self.edge_species_rates)
-        edge_reaction_rates = np.zeros_like(self.edge_reaction_rates)
+        num_core_species = self.core_species_rates.shape[0]
+        num_core_reactions = self.core_reaction_rates.shape[0]
+        num_reactions = self.reactant_indices.shape[0]
+        edge_species_rates = zeros_array(self.edge_species_rates.shape[0])
+        edge_reaction_rates = zeros_array(self.edge_reaction_rates.shape[0])
+        num_edge_species = edge_species_rates.shape[0]
+        num_species = num_core_species + num_edge_species
+        if edge_reaction_rates.shape[0] < num_reactions - num_core_reactions:
+            raise IndexError('There are more edge reactions than edge reaction rates')
 
-        for j in range(num_core_reactions, ir.shape[0]):
+        ir = int_data(self.reactant_indices, 3 * num_reactions)
+        ip = int_data(self.product_indices, 3 * num_reactions)
+        kf = float_data(self.kf, num_reactions)
+        kr = float_data(self.kb, num_reactions)
+        Cp = float_data(C, num_core_species)
+        species_rates = float_data(edge_species_rates, num_edge_species)
+        reaction_rates = float_data(edge_reaction_rates, num_reactions - num_core_reactions)
+
+        for j in range(num_core_reactions, num_reactions):
+            # The species of edge reactions are core or edge species (the arrays indexed below have
+            # num_core_species and num_edge_species values)
+            for m in range(3):
+                if ir[3 * j + m] < -1 or ir[3 * j + m] >= num_species or ip[3 * j + m] < -1 or ip[3 * j + m] >= num_species:
+                    raise IndexError('Invalid species index in edge reaction {0}'.format(j))
+            if ir[3 * j] < 0 or ip[3 * j] < 0:
+                raise IndexError('Invalid species index in edge reaction {0}'.format(j))
             k = kf[j]
-            if ir[j, 0] >= num_core_species or ir[j, 1] >= num_core_species or ir[j, 2] >= num_core_species:
+            if ir[3 * j] >= num_core_species or ir[3 * j + 1] >= num_core_species or ir[3 * j + 2] >= num_core_species:
                 f_reaction_rate = 0.0
-            elif ir[j, 1] == -1:  # only one reactant
-                f_reaction_rate = k * C[ir[j, 0]]
-            elif ir[j, 2] == -1:  # only two reactants
-                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]]
+            elif ir[3 * j + 1] == -1:  # only one reactant
+                f_reaction_rate = k * Cp[ir[3 * j]]
+            elif ir[3 * j + 2] == -1:  # only two reactants
+                f_reaction_rate = k * Cp[ir[3 * j]] * Cp[ir[3 * j + 1]]
             else:  # three reactants
-                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]] * C[ir[j, 2]]
+                f_reaction_rate = k * Cp[ir[3 * j]] * Cp[ir[3 * j + 1]] * Cp[ir[3 * j + 2]]
             k = kr[j]
-            if ip[j, 0] >= num_core_species or ip[j, 1] >= num_core_species or ip[j, 2] >= num_core_species:
+            if ip[3 * j] >= num_core_species or ip[3 * j + 1] >= num_core_species or ip[3 * j + 2] >= num_core_species:
                 rev_reaction_rate = 0.0
-            elif ip[j, 1] == -1:  # only one reactant
-                rev_reaction_rate = k * C[ip[j, 0]]
-            elif ip[j, 2] == -1:  # only two reactants
-                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]]
+            elif ip[3 * j + 1] == -1:  # only one reactant
+                rev_reaction_rate = k * Cp[ip[3 * j]]
+            elif ip[3 * j + 2] == -1:  # only two reactants
+                rev_reaction_rate = k * Cp[ip[3 * j]] * Cp[ip[3 * j + 1]]
             else:  # three reactants
-                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]] * C[ip[j, 2]]
+                rev_reaction_rate = k * Cp[ip[3 * j]] * Cp[ip[3 * j + 1]] * Cp[ip[3 * j + 2]]
 
             reaction_rate = f_reaction_rate - rev_reaction_rate
-            edge_reaction_rates[j - num_core_reactions] = reaction_rate
+            reaction_rates[j - num_core_reactions] = reaction_rate
 
             # Add/substract the total reaction rate from each species rate
             # Since it's an edge reaction its reactants and products could
             # be either core or edge species
             # We're only interested in the edge species
-            first = ir[j, 0]
-            if first >= num_core_species: edge_species_rates[first - num_core_species] -= reaction_rate
-            second = ir[j, 1]
+            first = ir[3 * j]
+            if first >= num_core_species: species_rates[first - num_core_species] -= reaction_rate
+            second = ir[3 * j + 1]
             if second != -1:
-                if second >= num_core_species: edge_species_rates[second - num_core_species] -= reaction_rate
-                third = ir[j, 2]
+                if second >= num_core_species: species_rates[second - num_core_species] -= reaction_rate
+                third = ir[3 * j + 2]
                 if third != -1:
-                    if third >= num_core_species: edge_species_rates[third - num_core_species] -= reaction_rate
-            first = ip[j, 0]
-            if first >= num_core_species: edge_species_rates[first - num_core_species] += reaction_rate
-            second = ip[j, 1]
+                    if third >= num_core_species: species_rates[third - num_core_species] -= reaction_rate
+            first = ip[3 * j]
+            if first >= num_core_species: species_rates[first - num_core_species] += reaction_rate
+            second = ip[3 * j + 1]
             if second != -1:
-                if second >= num_core_species: edge_species_rates[second - num_core_species] += reaction_rate
-                third = ip[j, 2]
+                if second >= num_core_species: species_rates[second - num_core_species] += reaction_rate
+                third = ip[3 * j + 2]
                 if third != -1:
-                    if third >= num_core_species: edge_species_rates[third - num_core_species] += reaction_rate
+                    if third >= num_core_species: species_rates[third - num_core_species] += reaction_rate
 
         self.edge_species_rates = edge_species_rates
         self.edge_reaction_rates = edge_reaction_rates

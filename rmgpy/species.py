@@ -62,6 +62,31 @@ from rmgpy.data.vaporLiquidMassTransfer import vapor_liquid_mass_transfer
 #: This dictionary is used to add multiplicity to species label
 _multiplicity_labels = {1: 'S', 2: 'D', 3: 'T', 4: 'Q', 5: 'V', }
 
+# While a species_value_cache is active, Species.get_free_energy() and Species.contains_surface_site() store their
+# results here, by species id
+_value_cache = None
+
+
+class species_value_cache(object):
+    """
+    A context manager during which Species.get_free_energy() and Species.contains_surface_site() store their
+    results, so that they are only calculated once for each species (and temperature). This is used while the
+    rate coefficients and equilibrium constants of all reactions of a model are calculated, in which each
+    species appears many times. The thermo and structure of the species must not change while it is active.
+    """
+
+    def __enter__(self):
+        global _value_cache
+        self.previous = _value_cache
+        _value_cache = {}
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        global _value_cache
+        _value_cache = self.previous
+        return False
+
+
 
 ################################################################################
 
@@ -553,6 +578,15 @@ class Species(object):
         """
         Return ``True`` if the species is adsorbed on a surface (or is itself a site), else ``False``.
         """
+        cache = _value_cache
+        if cache is not None:
+            key = ('surface', id(self))
+            entry = cache.get(key)
+            if entry is not None and entry[0] is self:
+                return entry[1]
+            result = self.molecule[0].contains_surface_site()
+            cache[key] = (self, result)
+            return result
         return self.molecule[0].contains_surface_site()
 
     def is_surface_site(self):
@@ -649,6 +683,12 @@ class Species(object):
         temperature `T` in K.
         """
         cython.declare(G=cython.double)
+        cache = _value_cache
+        if cache is not None:
+            key = ('G', id(self), T)
+            entry = cache.get(key)
+            if entry is not None and entry[0] is self:
+                return entry[1]
         G = 0.0
         if self.has_thermo():
             G = self.get_thermo_data().get_free_energy(T)
@@ -657,6 +697,8 @@ class Species(object):
         else:
             raise Exception('Unable to calculate free energy for species {0!r}: '
                             'no thermo or statmech data available.'.format(self.label))
+        if cache is not None:
+            cache[key] = (self, G)
         return G
 
     def get_sum_of_states(self, e_list):

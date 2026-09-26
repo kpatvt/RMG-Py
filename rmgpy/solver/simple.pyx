@@ -44,111 +44,12 @@ import rmgpy.constants as constants
 cimport rmgpy.constants as constants
 from rmgpy.quantity import Quantity
 from rmgpy.quantity cimport ScalarQuantity, ArrayQuantity
+from rmgpy.species import species_value_cache
 from rmgpy.solver.base cimport ReactionSystem
+from rmgpy.solver.base cimport pairwise_sum as _pairwise_sum, zeros_array as _zeros, float_data as _float_data, \
+    int_data as _int_data, check_indices as _check_indices
 from rmgpy.kinetics.model cimport KineticsModel
 from rmgpy.kinetics.falloff cimport ThirdBody, Lindemann, Troe
-
-
-cdef double _pairwise_sum(double * a, Py_ssize_t n) noexcept nogil:
-    """
-    Return the sum of the `n` values starting at `a`, rounded exactly as ``np.sum()`` rounds it (numpy's
-    pairwise summation: blocks of up to 128 values are summed with eight partial sums, and longer ranges are
-    split in two), so that replacing ``np.sum()`` by this function does not change any result.
-    """
-    cdef Py_ssize_t i, n2
-    cdef double res, r0, r1, r2, r3, r4, r5, r6, r7
-    if n < 8:
-        res = 0.
-        for i in range(n):
-            res += a[i]
-        return res
-    elif n <= 128:
-        r0 = a[0]
-        r1 = a[1]
-        r2 = a[2]
-        r3 = a[3]
-        r4 = a[4]
-        r5 = a[5]
-        r6 = a[6]
-        r7 = a[7]
-        i = 8
-        while i < n - (n % 8):
-            r0 += a[i]
-            r1 += a[i + 1]
-            r2 += a[i + 2]
-            r3 += a[i + 3]
-            r4 += a[i + 4]
-            r5 += a[i + 5]
-            r6 += a[i + 6]
-            r7 += a[i + 7]
-            i += 8
-        res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
-        while i < n:
-            res += a[i]
-            i += 1
-        return res
-    else:
-        n2 = n // 2
-        n2 -= n2 % 8
-        return _pairwise_sum(a, n2) + _pairwise_sum(a + n2, n - n2)
-
-
-cdef inline np.ndarray _zeros(Py_ssize_t n):
-    """
-    Return a new array of `n` zeros (like ``np.zeros(n)``, but without the Python call overhead).
-    """
-    cdef np.npy_intp dims[1]
-    dims[0] = n
-    return np.PyArray_ZEROS(1, dims, np.NPY_FLOAT64, 0)
-
-
-cdef double _empty_data[1]
-cdef long _empty_indices[1]
-
-
-cdef double * _float_data(np.ndarray a, Py_ssize_t n) except NULL:
-    """
-    Return a pointer to the data of the array of floats `a`, after checking that it is a contiguous array of
-    at least `n` values.
-    """
-    if np.PyArray_TYPE(a) != np.NPY_FLOAT64 or not np.PyArray_IS_C_CONTIGUOUS(a):
-        raise ValueError('Expected a contiguous array of floats')
-    if np.PyArray_SIZE(a) < n:
-        raise IndexError('Expected an array of at least {0} values, got {1}'.format(n, np.PyArray_SIZE(a)))
-    if np.PyArray_SIZE(a) == 0:
-        return _empty_data
-    return <double *> np.PyArray_DATA(a)
-
-
-cdef long * _int_data(np.ndarray a, Py_ssize_t n) except NULL:
-    """
-    Return a pointer to the data of the array of integers (``np.int_``) `a`, after checking that it is a contiguous
-    array of at least `n` values. For a two-dimensional array of reactant or product indices, `n` must be three
-    times the number of rows used, and the array must have three columns.
-    """
-    if np.PyArray_TYPE(a) != np.NPY_LONG or not np.PyArray_IS_C_CONTIGUOUS(a):
-        raise ValueError('Expected a contiguous array of integers')
-    if a.ndim == 2 and a.shape[1] != 3:
-        raise ValueError('Expected an array of indices with three columns')
-    if np.PyArray_SIZE(a) < n:
-        raise IndexError('Expected an array of at least {0} values, got {1}'.format(n, np.PyArray_SIZE(a)))
-    if np.PyArray_SIZE(a) == 0:
-        return _empty_indices
-    return <long *> np.PyArray_DATA(a)
-
-
-cdef inline int _check_indices(long * indices, Py_ssize_t num_species) except -1:
-    """
-    Check that the three species `indices` of a reaction (or network) refer to core species, as the
-    bounds checks of the arrays indexed by them did: the first index must be valid, and the others valid or -1.
-    """
-    if indices[0] < 0 or indices[0] >= num_species:
-        raise IndexError('Invalid species index {0}'.format(indices[0]))
-    if indices[1] < -1 or indices[1] >= num_species:
-        raise IndexError('Invalid species index {0}'.format(indices[1]))
-    if indices[2] < -1 or indices[2] >= num_species:
-        raise IndexError('Invalid species index {0}'.format(indices[2]))
-    return 0
 
 
 def pairwise_sum(np.ndarray[np.float64_t, ndim=1, mode='c'] a):
@@ -408,6 +309,16 @@ cdef class SimpleReactor(ReactionSystem):
         for i in range(self.pdep_collision_reaction_indices.shape[0]):
             collision_indices.setdefault(int(self.pdep_collision_reaction_indices[i]), i)
 
+        # Each species appears in many reactions, so its free energy is only calculated once
+        with species_value_cache():
+            self._generate_rate_coefficients(core_reactions, edge_reactions, y0_core_species, sum_core_species,
+                                             collision_indices)
+
+    def _generate_rate_coefficients(self, core_reactions, edge_reactions, y0_core_species, sum_core_species,
+                                    collision_indices):
+        """
+        Calculate the rate coefficients and equilibrium constants for generate_rate_coefficients().
+        """
         for rxn in itertools.chain(core_reactions, edge_reactions):
             j = self.reaction_index[rxn]
             i = collision_indices.get(j, -1)

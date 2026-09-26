@@ -35,6 +35,15 @@ else:
 
 ################################################################################
 
+# Helpers for the residual and simulation loops (see base.pyx)
+cdef double pairwise_sum(double * a, Py_ssize_t n) noexcept nogil
+cdef np.ndarray zeros_array(Py_ssize_t n)
+cdef double * float_data(np.ndarray a, Py_ssize_t n) except NULL
+cdef long * int_data(np.ndarray a, Py_ssize_t n) except NULL
+cdef int check_indices(long * indices, Py_ssize_t num_species) except -1
+
+################################################################################
+
 cdef class ReactionSystem(DASx):
 
     # reactor state variables:
