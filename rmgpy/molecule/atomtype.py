@@ -102,6 +102,7 @@ class AtomType:
         self.label = label
         self.generic = generic or []
         self.specific = specific or []
+        self._specific_labels = None
         self.increment_bond = []
         self.decrement_bond = []
         self.form_bond = []
@@ -164,6 +165,7 @@ class AtomType:
         self.label = d['label']
         self.generic = d['generic']
         self.specific = d['specific']
+        self._specific_labels = None
         self.increment_bond = d['increment_bond']
         self.decrement_bond = d['decrement_bond']
         self.form_bond = d['form_bond']
@@ -204,14 +206,31 @@ class AtomType:
         equivalent or ``False``  otherwise. This function respects wildcards,
         e.g. ``R!H`` is equivalent to ``C``.
         """
-        return self is other or self in other.specific or other in self.specific
+        return self is other or self.label in other._get_specific_labels() or other.label in self._get_specific_labels()
 
     def is_specific_case_of(self, other):
         """
         Returns ``True`` if atom type `atomType1` is a specific case of
         atom type `atomType2` or ``False``  otherwise.
         """
-        return self is other or self in other.specific
+        return self is other or self.label in other._get_specific_labels()
+
+    def _get_specific_labels(self):
+        """
+        Return the labels of the atom types in `specific` as a frozenset.
+
+        This is cached because the specificity checks are on the hot path of every
+        molecule-to-group isomorphism check, and a set lookup is much faster than
+        scanning the list (which has ~100 entries for wildcards like ``R!H``).
+        Atom type labels are unique, and the `specific` lists do not change after
+        this module has been loaded.
+        """
+        if self._specific_labels is None:
+            labels = set()
+            for a in self.specific:
+                labels.add(a if isinstance(a, str) else a.label)
+            self._specific_labels = frozenset(labels)
+        return self._specific_labels
 
     def get_features(self):
         """
@@ -900,6 +919,10 @@ def get_features(atom, bonds):
     return features
 
 
+# Cache of the atom types determined by get_atomtype, keyed by element symbol and features
+_atomtype_cache = {}
+
+
 def get_atomtype(atom, bonds):
     """
     Determine the appropriate atom type for an :class:`Atom` object `atom`
@@ -907,7 +930,7 @@ def get_atomtype(atom, bonds):
     """
 
     cython.declare(atom_symbol=str)
-    cython.declare(mol_feature_list=cython.list, atomtype_feature_list=cython.list)
+    cython.declare(mol_feature_list=cython.list, atomtype_feature_list=cython.list, key=tuple)
 
     # Use element and counts to determine proper atom type
     atom_symbol = atom.symbol
@@ -916,20 +939,30 @@ def get_atomtype(atom, bonds):
         return ATOMTYPES[atom_symbol]
 
     mol_feature_list = get_features(atom, bonds)
-    for specific_atom_type in ATOMTYPES[atom_symbol].specific:
-        atomtype_feature_list = specific_atom_type.get_features()
-        for mol_feature, atomtype_feature in zip(mol_feature_list, atomtype_feature_list):
-            if atomtype_feature == []:
-                continue
-            elif mol_feature not in atomtype_feature:
-                break
-        else:
-            return specific_atom_type
-    else:
-        single, all_double, r_double, o_double, s_double, triple, quadruple, benzene, lone_pairs, charge = mol_feature_list
+    # The atom type only depends on the element and the features, and there are few distinct
+    # combinations, so the result is cached instead of testing every specific atom type again
+    key = (atom_symbol, tuple(mol_feature_list))
+    specific_atom_type = _atomtype_cache.get(key)
+    if specific_atom_type is None:
+        for specific_atom_type in ATOMTYPES[atom_symbol].specific:
+            atomtype_feature_list = specific_atom_type.get_features()
+            for mol_feature, atomtype_feature in zip(mol_feature_list, atomtype_feature_list):
+                if atomtype_feature == []:
+                    continue
+                elif mol_feature not in atomtype_feature:
+                    break
+            else:
+                _atomtype_cache[key] = specific_atom_type
+                return specific_atom_type
+        # No atom type matches; this is cached too, since resonance structure generation tries
+        # many candidates with undefined atom types
+        _atomtype_cache[key] = False
+    elif specific_atom_type is not False:
+        return specific_atom_type
 
-        raise AtomTypeError(
-            f'Unable to determine atom type for atom {atom}, which has {single:d} single bonds, '
-            f'{all_double:d} double bonds ({o_double:d} to O, {s_double:d} to S, '
-            f'{r_double:d} others), {triple:d} triple bonds, {quadruple:d} quadruple bonds, '
-            f'{benzene:d} benzene bonds, {lone_pairs:d} lone pairs, and {charge:+d} charge.')
+    single, all_double, r_double, o_double, s_double, triple, quadruple, benzene, lone_pairs, charge = mol_feature_list
+    raise AtomTypeError(
+        f'Unable to determine atom type for atom {atom}, which has {single:d} single bonds, '
+        f'{all_double:d} double bonds ({o_double:d} to O, {s_double:d} to S, '
+        f'{r_double:d} others), {triple:d} triple bonds, {quadruple:d} quadruple bonds, '
+        f'{benzene:d} benzene bonds, {lone_pairs:d} lone pairs, and {charge:+d} charge.')

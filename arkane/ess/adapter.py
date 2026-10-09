@@ -35,6 +35,7 @@ from abc import ABC, abstractmethod
 import logging
 import os
 import shutil
+import tempfile
 
 from rmgpy.qm.qmdata import QMData
 from rmgpy.qm.symmetry import PointGroupCalculator
@@ -49,7 +50,9 @@ class ESSAdapter(ABC):
         self.path = path
         if check_for_errors:
             self.check_for_errors()
-        self.scratch_directory = scratch_directory if scratch_directory is not None else os.path.join(os.path.abspath('.'), str('scratch'))
+        # If no scratch directory is given, get_symmetry_properties() uses a new temporary directory
+        # for each calculation, so that concurrent Arkane runs cannot delete each other's files
+        self.scratch_directory = scratch_directory
 
     @abstractmethod
     def check_for_errors(self):
@@ -174,10 +177,13 @@ class ESSAdapter(ABC):
         """
         coordinates, atom_numbers, _ = self.load_geometry()
         unique_id = '0'  # Just some name that the SYMMETRY code gives to one of its jobs
-        # Scratch directory that the SYMMETRY code writes its files in:
-        scr_dir = self.scratch_directory
-        if not os.path.exists(scr_dir):
-            os.makedirs(scr_dir)
+        # Scratch directory that the SYMMETRY code writes its files in (deleted afterwards):
+        if self.scratch_directory is None:
+            scr_dir = tempfile.mkdtemp(prefix='arkane_symmetry_')
+        else:
+            scr_dir = self.scratch_directory
+            if not os.path.exists(scr_dir):
+                os.makedirs(scr_dir)
         try:
             qmdata = QMData(
                 groundStateDegeneracy=1,  # Only needed to check if valid QMData

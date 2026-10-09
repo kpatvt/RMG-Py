@@ -590,3 +590,25 @@ Thermo library: primaryThermoLibrary
         """Test that the species label is not being assigned with the multiplicity string"""
         assert self.species3.label == ""
         assert self.species4.label == "Propane"
+
+    def test_species_value_cache(self):
+        """
+        Test that get_free_energy() and contains_surface_site() give the same values while a species_value_cache
+        is active, and that the cached values are not used after it ends.
+        """
+        from rmgpy.species import species_value_cache
+
+        species = Species(smiles="CC")
+        species.thermo = ThermoData(Tdata=([300, 400, 500, 600, 800, 1000, 1500], "K"),
+                                    Cpdata=([52.5, 65.6, 77.9, 88.5, 105.1, 117.5, 136.4], "J/(mol*K)"),
+                                    H298=(-84.0, "kJ/mol"), S298=(229.1, "J/(mol*K)"))
+        expected = {T: species.get_free_energy(T) for T in (300.0, 1000.0)}
+        with species_value_cache():
+            for i in range(2):
+                for T, G in expected.items():
+                    assert species.get_free_energy(T) == G
+                assert species.contains_surface_site() is False
+        species.thermo = ThermoData(Tdata=([300, 400, 500, 600, 800, 1000, 1500], "K"),
+                                    Cpdata=([52.5, 65.6, 77.9, 88.5, 105.1, 117.5, 136.4], "J/(mol*K)"),
+                                    H298=(-80.0, "kJ/mol"), S298=(229.1, "J/(mol*K)"))
+        assert species.get_free_energy(300.0) != expected[300.0]

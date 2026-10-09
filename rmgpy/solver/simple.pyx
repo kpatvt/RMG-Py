@@ -25,6 +25,9 @@
 #                                                                             #
 ###############################################################################
 
+# The loops of the residual and Jacobian are vectorized at -O3 (which does not change floating point results)
+# distutils: extra_compile_args = -O3
+
 """
 Contains the :class:`SimpleReactor` class, providing a reaction system
 consisting of a homogeneous, isothermal, isobaric batch reactor.
@@ -41,7 +44,21 @@ import rmgpy.constants as constants
 cimport rmgpy.constants as constants
 from rmgpy.quantity import Quantity
 from rmgpy.quantity cimport ScalarQuantity, ArrayQuantity
+from rmgpy.species import species_value_cache
 from rmgpy.solver.base cimport ReactionSystem
+from rmgpy.solver.base cimport pairwise_sum as _pairwise_sum, zeros_array as _zeros, float_data as _float_data, \
+    int_data as _int_data, check_indices as _check_indices
+from rmgpy.kinetics.model cimport KineticsModel
+from rmgpy.kinetics.falloff cimport ThirdBody, Lindemann, Troe
+
+
+def pairwise_sum(np.ndarray[np.float64_t, ndim=1, mode='c'] a):
+    """
+    Return the sum of the values of the contiguous array `a`, rounded exactly as ``np.sum(a)`` rounds it.
+    """
+    if a.shape[0] == 0:
+        return 0.
+    return _pairwise_sum(&a[0], a.shape[0])
 
 
 cdef class SimpleReactor(ReactionSystem):
@@ -104,6 +121,25 @@ cdef class SimpleReactor(ReactionSystem):
     a specifcCollider attribyte. E.g. [16, 155, 90]
     """
     cdef public np.ndarray pdep_specific_collider_reaction_indices
+
+    # The parts of the rate coefficients of the reactions with collider efficiencies that only depend on the
+    # temperature (see ThirdBody, Lindemann and Troe.get_temperature_terms()), which are calculated once per
+    # simulation instead of in every residual evaluation, for the kinetics in collider_rate_terms_kinetics at the
+    # temperature collider_rate_terms_T. collider_rate_kinds is 1, 2 or 3 for ThirdBody, Lindemann or Troe
+    # kinetics, and 0 for other kinetics, whose rate coefficients are calculated as usual
+    cdef np.ndarray collider_rate_terms
+    cdef np.ndarray collider_rate_kinds
+    cdef double collider_rate_terms_T
+    cdef list collider_rate_terms_kinetics
+
+    # The species index arrays (and numbers of core species and reactions) that residual() has checked to
+    # contain valid core species indices. The arrays are created by initialize_model() and not modified
+    # afterwards, so they only need to be checked once
+    cdef object checked_reactant_indices
+    cdef object checked_product_indices
+    cdef object checked_network_indices
+    cdef Py_ssize_t checked_num_core_species
+    cdef Py_ssize_t checked_num_core_reactions
 
     cdef public dict sens_conditions
 
@@ -265,9 +301,34 @@ cdef class SimpleReactor(ReactionSystem):
         and (effective) pressure of the reaction system.
         """
 
+        # Compute the effective pressures as calculate_effective_pressure() does, without searching
+        # the pressure-dependent reactions with collider efficiencies for each reaction
+        y0_core_species = self.y0[:self.num_core_species]
+        sum_core_species = np.sum(y0_core_species)
+        collision_indices = {}
+        for i in range(self.pdep_collision_reaction_indices.shape[0]):
+            collision_indices.setdefault(int(self.pdep_collision_reaction_indices[i]), i)
+
+        # Each species appears in many reactions, so its free energy is only calculated once
+        with species_value_cache():
+            self._generate_rate_coefficients(core_reactions, edge_reactions, y0_core_species, sum_core_species,
+                                             collision_indices)
+
+    def _generate_rate_coefficients(self, core_reactions, edge_reactions, y0_core_species, sum_core_species,
+                                    collision_indices):
+        """
+        Calculate the rate coefficients and equilibrium constants for generate_rate_coefficients().
+        """
         for rxn in itertools.chain(core_reactions, edge_reactions):
             j = self.reaction_index[rxn]
-            Peff = self.calculate_effective_pressure(rxn)
+            i = collision_indices.get(j, -1)
+            if i < 0:
+                Peff = self.P.value_si
+            elif rxn.specific_collider is None:
+                Peff = self.P.value_si * np.sum(self.collider_efficiencies[i] * y0_core_species / sum_core_species)
+            else:
+                logging.debug("Calculating Peff using {0} as a specific_collider".format(rxn.specific_collider))
+                Peff = self.P.value_si * self.y0[self.species_index[rxn.specific_collider]] / sum_core_species
             self.kf[j] = rxn.get_rate_coefficient(self.T.value_si, Peff)
 
             if rxn.reversible:
@@ -321,6 +382,42 @@ cdef class SimpleReactor(ReactionSystem):
         self.pdep_collision_reaction_indices = np.array(pdep_collider_reaction_indices, int)
         self.collider_efficiencies = np.array(collider_efficiencies, float)
         self.pdep_specific_collider_reaction_indices = np.array(pdep_specific_collider_reaction_indices, int)
+        # The temperature-dependent terms of the rate coefficients are calculated again for the new kinetics
+        self.collider_rate_terms_kinetics = None
+
+    cdef int set_collider_rate_terms(self, double T) except -1:
+        """
+        Calculate the parts of the rate coefficients of the reactions with collider efficiencies that only depend
+        on the temperature `T`.
+        """
+        cdef Py_ssize_t i, n
+        cdef object kinetics
+        cdef np.ndarray terms, kinds
+        cdef double * termsp
+        cdef long * kindsp
+        n = len(self.pdep_collider_kinetics)
+        terms = _zeros(4 * n)
+        kinds = np.zeros(n, int)
+        termsp = _float_data(terms, 4 * n)
+        kindsp = _int_data(kinds, n)
+        for i in range(n):
+            kinetics = self.pdep_collider_kinetics[i]
+            # Only for these exact classes, whose get_rate_coefficient() uses get_temperature_terms() and
+            # get_rate_from_terms(), not for subclasses that might calculate their rate coefficients differently
+            if type(kinetics) is ThirdBody:
+                kindsp[i] = 1
+                (<ThirdBody> kinetics).get_temperature_terms(T, termsp + 4 * i)
+            elif type(kinetics) is Lindemann:
+                kindsp[i] = 2
+                (<Lindemann> kinetics).get_temperature_terms(T, termsp + 4 * i)
+            elif type(kinetics) is Troe:
+                kindsp[i] = 3
+                (<Troe> kinetics).get_temperature_terms(T, termsp + 4 * i)
+        self.collider_rate_terms = terms
+        self.collider_rate_kinds = kinds
+        self.collider_rate_terms_T = T
+        self.collider_rate_terms_kinetics = self.pdep_collider_kinetics
+        return 0
 
     def set_initial_conditions(self):
         """
@@ -350,190 +447,257 @@ cdef class SimpleReactor(ReactionSystem):
             self.core_species_concentrations[j] = self.y0[j] / self.V
 
     @cython.boundscheck(False)
-    def residual(self, double t, np.ndarray[np.float64_t, ndim=1] y, np.ndarray[np.float64_t, ndim=1] dydt,
+    def residual(self, double t, np.ndarray y, np.ndarray dydt,
                  np.ndarray[np.float64_t, ndim=1] senpar = np.zeros(1, float)):
 
         """
         Return the residual function for the governing DAE system for the
         simple reaction system.
         """
-        cdef np.ndarray[np.int_t, ndim=2] ir, ip, inet
-        cdef np.ndarray[np.float64_t, ndim=1] res, kf, kr, knet, delta, equilibrium_constants
-        cdef Py_ssize_t num_core_species, num_core_reactions, num_edge_species, num_edge_reactions, num_pdep_networks
-        cdef Py_ssize_t i, j, z, first, second, third
-        cdef double k, V, reaction_rate, rev_reaction_rate, T, P, Peff
-        cdef np.ndarray[np.float64_t, ndim=1] core_species_concentrations, core_species_rates, core_reaction_rates
-        cdef np.ndarray[np.float64_t, ndim=1] edge_species_rates, edge_reaction_rates, network_leak_rates
-        cdef np.ndarray[np.float64_t, ndim=1] core_species_consumption_rates, core_species_production_rates
-        cdef np.ndarray[np.float64_t, ndim=1] C, y_core_species
-        cdef np.ndarray[np.float64_t, ndim=2] jacobian, dgdk, collider_efficiencies
-        cdef np.ndarray[np.int_t, ndim=1] pdep_collider_reaction_indices, pdep_specific_collider_reaction_indices
+        cdef np.ndarray delta, res, equilibrium_constants, collider_efficiencies, collider_terms
+        cdef np.ndarray core_species_concentrations, core_species_rates, core_reaction_rates, network_leak_rates
+        cdef np.ndarray core_species_consumption_rates, core_species_production_rates, C
+        cdef np.ndarray[np.float64_t, ndim=2] jacobian, dgdk
+        cdef np.ndarray pdep_collider_reaction_indices, pdep_specific_collider_reaction_indices
         cdef list pdep_collider_kinetics, pdep_specific_collider_kinetics
+        cdef Py_ssize_t num_core_species, num_core_reactions, num_edge_species, num_edge_reactions, num_pdep_networks
+        cdef Py_ssize_t i, j, z, first, second, third, num_inet
+        cdef double k, V, reaction_rate, f_reaction_rate, rev_reaction_rate, T, P, Peff, y_sum
+        cdef KineticsModel kinetics_model
+        cdef Py_ssize_t num_rate_coefficients
+        cdef long * rate_kinds
+        cdef double * rate_terms
+        # Pointers to the data of the arrays used in the loops below. The arrays are checked to be contiguous
+        # and of the right type by _float_data() and _int_data(); accessing them through pointers avoids
+        # acquiring a buffer for each array in every residual evaluation
+        cdef long * ir
+        cdef long * ip
+        cdef long * inet
+        cdef long * collider_indices
+        cdef double * yp
+        cdef double * dydtp
+        cdef double * kf
+        cdef double * kr
+        cdef double * knet
+        cdef double * keq
+        cdef double * efficiencies
+        cdef double * terms
+        cdef double * Cp
+        cdef double * concentrations
+        cdef double * species_rates
+        cdef double * reaction_rates
+        cdef double * consumption_rates
+        cdef double * production_rates
+        cdef double * leak_rates
+        cdef double * deltap
 
-        ir = self.reactant_indices
-        ip = self.product_indices
+        num_core_species = self.core_species_rates.shape[0]
+        num_core_reactions = self.core_reaction_rates.shape[0]
+        num_edge_species = self.edge_species_rates.shape[0]
+        num_edge_reactions = self.edge_reaction_rates.shape[0]
+        num_pdep_networks = self.network_leak_rates.shape[0]
 
-        num_core_species = len(self.core_species_rates)
-        num_core_reactions = len(self.core_reaction_rates)
-        num_edge_species = len(self.edge_species_rates)
-        num_edge_reactions = len(self.edge_reaction_rates)
-        num_pdep_networks = len(self.network_leak_rates)
-        kf = self.kf
-        kr = self.kb
+        yp = _float_data(y, num_core_species)
+        ir = _int_data(self.reactant_indices, 3 * num_core_reactions)
+        ip = _int_data(self.product_indices, 3 * num_core_reactions)
+        # The rate coefficients of the core reactions, followed by those of the edge reactions
+        num_rate_coefficients = self.kf.shape[0]
+        if self.kb.shape[0] != num_rate_coefficients:
+            raise ValueError('Inconsistent numbers of forward and reverse rate coefficients')
+        kf = _float_data(self.kf, max(num_rate_coefficients, num_core_reactions))
+        kr = _float_data(self.kb, max(num_rate_coefficients, num_core_reactions))
 
-        y_core_species = y[:num_core_species]
+        # The sum of the core species amounts, rounded as np.sum() rounds it
+        y_sum = _pairwise_sum(yp, num_core_species)
 
         # Recalculate any forward and reverse rate coefficients that involve pdep collision efficiencies
         if self.pdep_collision_reaction_indices.shape[0] != 0:
             T = self.T.value_si
             P = self.P.value_si
             equilibrium_constants = self.Keq
+            keq = _float_data(equilibrium_constants, num_rate_coefficients)
             pdep_collider_reaction_indices = self.pdep_collision_reaction_indices
             pdep_collider_kinetics = self.pdep_collider_kinetics
             collider_efficiencies = self.collider_efficiencies
+            collider_indices = _int_data(pdep_collider_reaction_indices, pdep_collider_reaction_indices.shape[0])
+            efficiencies = _float_data(collider_efficiencies,
+                                       pdep_collider_reaction_indices.shape[0] * num_core_species)
+            if collider_efficiencies.ndim != 2 or collider_efficiencies.shape[1] != num_core_species:
+                raise ValueError('Collider efficiencies do not match the core species')
+            # The effective pressure of each reaction is
+            # P * np.sum(collider_efficiencies[i] * y_core_species / np.sum(y_core_species)),
+            # which is calculated here without numpy calls, but with exactly the same rounding
+            collider_terms = _zeros(num_core_species)
+            terms = <double *> np.PyArray_DATA(collider_terms)
+            if self.collider_rate_terms_kinetics is not pdep_collider_kinetics or self.collider_rate_terms_T != T:
+                self.set_collider_rate_terms(T)
+            rate_kinds = _int_data(self.collider_rate_kinds, pdep_collider_reaction_indices.shape[0])
+            rate_terms = _float_data(self.collider_rate_terms, 4 * pdep_collider_reaction_indices.shape[0])
             for i in range(pdep_collider_reaction_indices.shape[0]):
-                # Calculate effective pressure
-                Peff = P * np.sum(collider_efficiencies[i] * y_core_species / np.sum(y_core_species))
-                j = pdep_collider_reaction_indices[i]
-                kf[j] = pdep_collider_kinetics[i].get_rate_coefficient(T, Peff)
-                kr[j] = kf[j] / equilibrium_constants[j]
+                for z in range(num_core_species):
+                    terms[z] = efficiencies[i * num_core_species + z] * yp[z] / y_sum
+                Peff = P * _pairwise_sum(terms, num_core_species)
+                j = collider_indices[i]
+                if j < 0 or j >= num_rate_coefficients:
+                    raise IndexError('Invalid pressure-dependent reaction index {0}'.format(j))
+                kinetics_model = pdep_collider_kinetics[i]
+                if rate_kinds[i] == 3:
+                    kf[j] = (<Troe> kinetics_model).get_rate_from_terms(T, Peff, rate_terms + 4 * i)
+                elif rate_kinds[i] == 2:
+                    kf[j] = (<Lindemann> kinetics_model).get_rate_from_terms(T, Peff, rate_terms + 4 * i)
+                elif rate_kinds[i] == 1:
+                    kf[j] = (<ThirdBody> kinetics_model).get_rate_from_terms(T, Peff, rate_terms + 4 * i)
+                else:
+                    kf[j] = kinetics_model.get_rate_coefficient(T, Peff)
+                kr[j] = kf[j] / keq[j]
         if self.pdep_specific_collider_reaction_indices.shape[0] != 0:
             T = self.T.value_si
             P = self.P.value_si
             equilibrium_constants = self.Keq
+            keq = _float_data(equilibrium_constants, num_rate_coefficients)
             pdep_specific_collider_reaction_indices = self.pdep_specific_collider_reaction_indices
             pdep_specific_collider_kinetics = self.pdep_specific_collider_kinetics
             specific_collider_species = self.specific_collider_species
+            collider_indices = _int_data(pdep_specific_collider_reaction_indices,
+                                         pdep_specific_collider_reaction_indices.shape[0])
             for i in range(pdep_specific_collider_reaction_indices.shape[0]):
-                if len(y) > self.species_index[specific_collider_species[i]]:
+                j = collider_indices[i]
+                if j < 0 or j >= num_rate_coefficients:
+                    raise IndexError('Invalid pressure-dependent reaction index {0}'.format(j))
+                z = self.species_index[specific_collider_species[i]]
+                if len(y) > z:
                     # Calculate the effective pressure
-                    Peff = P * y[self.species_index[specific_collider_species[i]]] / np.sum(y_core_species)
-                    j = pdep_specific_collider_reaction_indices[i]
-                    kf[j] = pdep_specific_collider_kinetics[i].get_rate_coefficient(T, Peff)
+                    Peff = P * yp[z] / y_sum
+                    kinetics_model = pdep_specific_collider_kinetics[i]
+                    kf[j] = kinetics_model.get_rate_coefficient(T, Peff)
                 else:
                     kf[j] = 0
-            kr[j] = kf[j] / equilibrium_constants[j]
+                kr[j] = kf[j] / keq[j]
 
-        inet = self.network_indices
-        knet = self.network_leak_coefficients
+        num_inet = self.network_indices.shape[0]
+        inet = _int_data(self.network_indices, 3 * num_inet)
+        knet = _float_data(self.network_leak_coefficients, num_inet)
 
-        res = np.zeros(num_core_species, float)
+        core_species_concentrations = _zeros(self.core_species_concentrations.shape[0])
+        core_species_rates = _zeros(num_core_species)
+        core_reaction_rates = _zeros(num_core_reactions)
+        core_species_consumption_rates = _zeros(self.core_species_consumption_rates.shape[0])
+        core_species_production_rates = _zeros(self.core_species_production_rates.shape[0])
+        network_leak_rates = _zeros(num_pdep_networks)
+        C = _zeros(self.core_species_concentrations.shape[0])
+        if (core_species_concentrations.shape[0] < num_core_species
+                or core_species_consumption_rates.shape[0] < num_core_species
+                or core_species_production_rates.shape[0] < num_core_species
+                or num_pdep_networks < num_inet):
+            raise ValueError('Inconsistent array sizes in the reaction system')
+        concentrations = <double *> np.PyArray_DATA(core_species_concentrations)
+        species_rates = <double *> np.PyArray_DATA(core_species_rates)
+        reaction_rates = <double *> np.PyArray_DATA(core_reaction_rates)
+        consumption_rates = <double *> np.PyArray_DATA(core_species_consumption_rates)
+        production_rates = <double *> np.PyArray_DATA(core_species_production_rates)
+        leak_rates = <double *> np.PyArray_DATA(network_leak_rates)
+        Cp = <double *> np.PyArray_DATA(C)
 
-        core_species_concentrations = np.zeros_like(self.core_species_concentrations)
-        core_species_rates = np.zeros_like(self.core_species_rates)
-        core_reaction_rates = np.zeros_like(self.core_reaction_rates)
-        core_species_consumption_rates = np.zeros_like(self.core_species_consumption_rates)
-        core_species_production_rates = np.zeros_like(self.core_species_production_rates)
-        edge_species_rates = np.zeros_like(self.edge_species_rates)
-        edge_reaction_rates = np.zeros_like(self.edge_reaction_rates)
-        network_leak_rates = np.zeros_like(self.network_leak_rates)
-
-        C = np.zeros_like(self.core_species_concentrations)
+        if (self.checked_reactant_indices is not self.reactant_indices
+                or self.checked_product_indices is not self.product_indices
+                or self.checked_network_indices is not self.network_indices
+                or self.checked_num_core_species != num_core_species
+                or self.checked_num_core_reactions != num_core_reactions):
+            # Check that the core reactions and networks only refer to core species (the arrays indexed by
+            # these indices below are accessed through pointers, without bounds checks)
+            for j in range(num_core_reactions):
+                _check_indices(ir + 3 * j, num_core_species)
+                _check_indices(ip + 3 * j, num_core_species)
+            for j in range(num_inet):
+                if inet[3 * j] != -1:
+                    _check_indices(inet + 3 * j, num_core_species)
+            self.checked_reactant_indices = self.reactant_indices
+            self.checked_product_indices = self.product_indices
+            self.checked_network_indices = self.network_indices
+            self.checked_num_core_species = num_core_species
+            self.checked_num_core_reactions = num_core_reactions
 
         # Use ideal gas law to compute volume
-        V = constants.R * self.T.value_si * np.sum(y_core_species) / self.P.value_si
+        V = constants.R * self.T.value_si * y_sum / self.P.value_si
         self.V = V
 
         for j in range(num_core_species):
-            C[j] = y[j] / V
-            core_species_concentrations[j] = C[j]
+            Cp[j] = yp[j] / V
+            concentrations[j] = Cp[j]
 
-        for j in range(ir.shape[0]):
+        # Only the core reactions are needed to evaluate the residual. The edge reaction and species
+        # rates are only needed after each step, so they are calculated from the concentrations of
+        # the last residual evaluation by update_edge_rates()
+        for j in range(num_core_reactions):
             k = kf[j]
-            if ir[j, 0] >= num_core_species or ir[j, 1] >= num_core_species or ir[j, 2] >= num_core_species:
+            if ir[3 * j] >= num_core_species or ir[3 * j + 1] >= num_core_species or ir[3 * j + 2] >= num_core_species:
                 f_reaction_rate = 0.0
-            elif ir[j, 1] == -1:  # only one reactant
-                f_reaction_rate = k * C[ir[j, 0]]
-            elif ir[j, 2] == -1:  # only two reactants
-                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]]
+            elif ir[3 * j + 1] == -1:  # only one reactant
+                f_reaction_rate = k * Cp[ir[3 * j]]
+            elif ir[3 * j + 2] == -1:  # only two reactants
+                f_reaction_rate = k * Cp[ir[3 * j]] * Cp[ir[3 * j + 1]]
             else:  # three reactants
-                f_reaction_rate = k * C[ir[j, 0]] * C[ir[j, 1]] * C[ir[j, 2]]
+                f_reaction_rate = k * Cp[ir[3 * j]] * Cp[ir[3 * j + 1]] * Cp[ir[3 * j + 2]]
             k = kr[j]
-            if ip[j, 0] >= num_core_species or ip[j, 1] >= num_core_species or ip[j, 2] >= num_core_species:
+            if ip[3 * j] >= num_core_species or ip[3 * j + 1] >= num_core_species or ip[3 * j + 2] >= num_core_species:
                 rev_reaction_rate = 0.0
-            elif ip[j, 1] == -1:  # only one reactant
-                rev_reaction_rate = k * C[ip[j, 0]]
-            elif ip[j, 2] == -1:  # only two reactants
-                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]]
+            elif ip[3 * j + 1] == -1:  # only one reactant
+                rev_reaction_rate = k * Cp[ip[3 * j]]
+            elif ip[3 * j + 2] == -1:  # only two reactants
+                rev_reaction_rate = k * Cp[ip[3 * j]] * Cp[ip[3 * j + 1]]
             else:  # three reactants
-                rev_reaction_rate = k * C[ip[j, 0]] * C[ip[j, 1]] * C[ip[j, 2]]
+                rev_reaction_rate = k * Cp[ip[3 * j]] * Cp[ip[3 * j + 1]] * Cp[ip[3 * j + 2]]
 
             reaction_rate = f_reaction_rate - rev_reaction_rate
 
             # Set the reaction and species rates
-            if j < num_core_reactions:
-                # The reaction is a core reaction
-                core_reaction_rates[j] = reaction_rate
+            # The reaction is a core reaction
+            reaction_rates[j] = reaction_rate
 
-                # Add/substract the total reaction rate from each species rate
-                # Since it's a core reaction we know that all of its reactants
-                # and products are core species
-                first = ir[j, 0]
-                core_species_rates[first] -= reaction_rate
-                core_species_consumption_rates[first] += f_reaction_rate
-                core_species_production_rates[first] += rev_reaction_rate
-                second = ir[j, 1]
-                if second != -1:
-                    core_species_rates[second] -= reaction_rate
-                    core_species_consumption_rates[second] += f_reaction_rate
-                    core_species_production_rates[second] += rev_reaction_rate
-                    third = ir[j, 2]
-                    if third != -1:
-                        core_species_rates[third] -= reaction_rate
-                        core_species_consumption_rates[third] += f_reaction_rate
-                        core_species_production_rates[third] += rev_reaction_rate
-                first = ip[j, 0]
-                core_species_rates[first] += reaction_rate
-                core_species_production_rates[first] += f_reaction_rate
-                core_species_consumption_rates[first] += rev_reaction_rate
-                second = ip[j, 1]
-                if second != -1:
-                    core_species_rates[second] += reaction_rate
-                    core_species_production_rates[second] += f_reaction_rate
-                    core_species_consumption_rates[second] += rev_reaction_rate
-                    third = ip[j, 2]
-                    if third != -1:
-                        core_species_rates[third] += reaction_rate
-                        core_species_production_rates[third] += f_reaction_rate
-                        core_species_consumption_rates[third] += rev_reaction_rate
+            # Add/substract the total reaction rate from each species rate
+            # Since it's a core reaction we know that all of its reactants
+            # and products are core species
+            first = ir[3 * j]
+            species_rates[first] -= reaction_rate
+            consumption_rates[first] += f_reaction_rate
+            production_rates[first] += rev_reaction_rate
+            second = ir[3 * j + 1]
+            if second != -1:
+                species_rates[second] -= reaction_rate
+                consumption_rates[second] += f_reaction_rate
+                production_rates[second] += rev_reaction_rate
+                third = ir[3 * j + 2]
+                if third != -1:
+                    species_rates[third] -= reaction_rate
+                    consumption_rates[third] += f_reaction_rate
+                    production_rates[third] += rev_reaction_rate
+            first = ip[3 * j]
+            species_rates[first] += reaction_rate
+            production_rates[first] += f_reaction_rate
+            consumption_rates[first] += rev_reaction_rate
+            second = ip[3 * j + 1]
+            if second != -1:
+                species_rates[second] += reaction_rate
+                production_rates[second] += f_reaction_rate
+                consumption_rates[second] += rev_reaction_rate
+                third = ip[3 * j + 2]
+                if third != -1:
+                    species_rates[third] += reaction_rate
+                    production_rates[third] += f_reaction_rate
+                    consumption_rates[third] += rev_reaction_rate
 
-            else:
-                # The reaction is an edge reaction
-                edge_reaction_rates[j - num_core_reactions] = reaction_rate
-
-                # Add/substract the total reaction rate from each species rate
-                # Since it's an edge reaction its reactants and products could
-                # be either core or edge species
-                # We're only interested in the edge species
-                first = ir[j, 0]
-                if first >= num_core_species: edge_species_rates[first - num_core_species] -= reaction_rate
-                second = ir[j, 1]
-                if second != -1:
-                    if second >= num_core_species: edge_species_rates[second - num_core_species] -= reaction_rate
-                    third = ir[j, 2]
-                    if third != -1:
-                        if third >= num_core_species: edge_species_rates[third - num_core_species] -= reaction_rate
-                first = ip[j, 0]
-                if first >= num_core_species: edge_species_rates[first - num_core_species] += reaction_rate
-                second = ip[j, 1]
-                if second != -1:
-                    if second >= num_core_species: edge_species_rates[second - num_core_species] += reaction_rate
-                    third = ip[j, 2]
-                    if third != -1:
-                        if third >= num_core_species: edge_species_rates[third - num_core_species] += reaction_rate
-
-        for j in range(inet.shape[0]):
-            if inet[j, 0] != -1: #all source species are in the core
+        for j in range(num_inet):
+            if inet[3 * j] != -1: #all source species are in the core
                 k = knet[j]
-                if inet[j, 1] == -1:  # only one reactant
-                    reaction_rate = k * C[inet[j, 0]]
-                elif inet[j, 2] == -1:  # only two reactants
-                    reaction_rate = k * C[inet[j, 0]] * C[inet[j, 1]]
+                if inet[3 * j + 1] == -1:  # only one reactant
+                    reaction_rate = k * Cp[inet[3 * j]]
+                elif inet[3 * j + 2] == -1:  # only two reactants
+                    reaction_rate = k * Cp[inet[3 * j]] * Cp[inet[3 * j + 1]]
                 else:  # three reactants
-                    reaction_rate = k * C[inet[j, 0]] * C[inet[j, 1]] * C[inet[j, 2]]
-                network_leak_rates[j] = reaction_rate
+                    reaction_rate = k * Cp[inet[3 * j]] * Cp[inet[3 * j + 1]] * Cp[inet[3 * j + 2]]
+                leak_rates[j] = reaction_rate
             else:
-                network_leak_rates[j] = 0.0
+                leak_rates[j] = 0.0
 
         if self.const_spc_indices is not None:
             for spc_index in self.const_spc_indices:
@@ -544,13 +708,11 @@ cdef class SimpleReactor(ReactionSystem):
         self.core_species_production_rates = core_species_production_rates
         self.core_species_consumption_rates = core_species_consumption_rates
         self.core_reaction_rates = core_reaction_rates
-        self.edge_species_rates = edge_species_rates
-        self.edge_reaction_rates = edge_reaction_rates
+        self.edge_rate_concentrations = C
         self.network_leak_rates = network_leak_rates
 
-        res = core_species_rates * V
-
         if self.sensitivity:
+            res = core_species_rates * V
             delta = np.zeros(len(y), float)
             delta[:num_core_species] = res
             if self.jacobian_matrix is None:
@@ -563,15 +725,24 @@ cdef class SimpleReactor(ReactionSystem):
                     for z in range(num_core_species):
                         delta[(j + 1) * num_core_species + i] += jacobian[i, z] * y[(j + 1) * num_core_species + z]
                     delta[(j + 1) * num_core_species + i] += dgdk[i, j]
-
+            delta = delta - dydt
         else:
-            delta = res
-        delta = delta - dydt
+            # delta = core_species_rates * V - dydt, without the temporary arrays
+            dydtp = _float_data(dydt, num_core_species)
+            if dydt.shape[0] != num_core_species:
+                raise ValueError('operands could not be broadcast together with shapes ({0},) ({1},)'.format(
+                    num_core_species, dydt.shape[0]))
+            delta = _zeros(num_core_species)
+            deltap = <double *> np.PyArray_DATA(delta)
+            for i in range(num_core_species):
+                deltap[i] = species_rates[i] * V
+                deltap[i] = deltap[i] - dydtp[i]
 
         # Return DELTA, IRES.  IRES is set to 1 in order to tell DASPK to evaluate the sensitivity residuals
         return delta, 1
 
     @cython.boundscheck(False)
+    @cython.wraparound(False)
     def jacobian(self, double t, np.ndarray[np.float64_t, ndim=1] y, np.ndarray[np.float64_t, ndim=1] dydt,
                  double cj, np.ndarray[np.float64_t, ndim=1] senpar = np.zeros(1, float)):
         """
@@ -579,7 +750,10 @@ cdef class SimpleReactor(ReactionSystem):
         """
         cdef np.ndarray[np.int_t, ndim=2] ir, ip
         cdef np.ndarray[np.float64_t, ndim=1] kf, kr, C
-        cdef np.ndarray[np.float64_t, ndim=2] pd
+        # The matrix is C-contiguous, which lets the compiler vectorize the loops over its rows
+        cdef np.ndarray[np.float64_t, ndim=2, mode='c'] pd
+        cdef np.ndarray[np.float64_t, ndim=1] row_corrections
+        cdef np.ndarray[np.float64_t, ndim=2, mode='c'] jacobian_matrix
         cdef int num_core_reactions, num_core_species, i, j
         cdef double k, V, Ctot, deriv, corr
 
@@ -591,7 +765,9 @@ cdef class SimpleReactor(ReactionSystem):
         num_core_reactions = len(self.core_reaction_rates)
         num_core_species = len(self.core_species_concentrations)
 
-        pd = -cj * np.identity(num_core_species, float)
+        pd = np.zeros((num_core_species, num_core_species), float)
+        for j in range(num_core_species):
+            pd[j, j] = -cj
 
         V = constants.R * self.T.value_si * np.sum(y[:num_core_species]) / self.P.value_si
 
@@ -600,6 +776,10 @@ cdef class SimpleReactor(ReactionSystem):
         C = np.zeros_like(self.core_species_concentrations)
         for j in range(num_core_species):
             C[j] = y[j] / V
+
+        # The derivatives of the rates with respect to the total amount (through the volume) are the same for
+        # every column of a row, so they are summed per row and added to the rows at the end
+        row_corrections = np.zeros(num_core_species, float)
 
         for j in range(num_core_reactions):
 
@@ -620,20 +800,16 @@ cdef class SimpleReactor(ReactionSystem):
                 if ir[j, 0] == ir[j, 1]:  # reactants are the same
                     deriv = 2 * k * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 0]] -= 2 * deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= 2 * corr
+                    row_corrections[ir[j, 0]] -= 2 * corr
 
                     pd[ip[j, 0], ir[j, 0]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 0]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 0]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
                 else:
                     # Derivative with respect to reactant 1
@@ -651,42 +827,34 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 1]] -= deriv
                     pd[ir[j, 1], ir[j, 1]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= corr
-                        pd[ir[j, 1], i] -= corr
+                    row_corrections[ir[j, 0]] -= corr
+                    row_corrections[ir[j, 1]] -= corr
 
                     pd[ip[j, 0], ir[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
 
             else:  # three reactants
                 corr = - 2 * k * C[ir[j, 0]] * C[ir[j, 1]] * C[ir[j, 2]] / Ctot
-                if (ir[j, 0] == ir[j, 1] & ir[j, 0] == ir[j, 2]):
+                if ir[j, 0] == ir[j, 1] and ir[j, 0] == ir[j, 2]:
                     deriv = 3 * k * C[ir[j, 0]] * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 0]] -= 3 * deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= 3 * corr
+                    row_corrections[ir[j, 0]] -= 3 * corr
 
                     pd[ip[j, 0], ir[j, 0]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 0]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 0]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
                 elif ir[j, 0] == ir[j, 1]:
                     # derivative with respect to reactant 1
@@ -704,21 +872,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ir[j, 0]] * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 2]] -= 2 * deriv
                     pd[ir[j, 2], ir[j, 2]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= 2 * corr
-                        pd[ir[j, 2], i] -= corr
+                    row_corrections[ir[j, 0]] -= 2 * corr
+                    row_corrections[ir[j, 2]] -= corr
 
                     pd[ip[j, 0], ir[j, 2]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 2]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 2]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
 
                 elif ir[j, 1] == ir[j, 2]:
@@ -736,21 +900,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = 2 * k * C[ir[j, 0]] * C[ir[j, 1]]
                     pd[ir[j, 0], ir[j, 1]] -= deriv
                     pd[ir[j, 1], ir[j, 1]] -= 2 * deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= corr
-                        pd[ir[j, 1], i] -= 2 * corr
+                    row_corrections[ir[j, 0]] -= corr
+                    row_corrections[ir[j, 1]] -= 2 * corr
 
                     pd[ip[j, 0], ir[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
                 elif ir[j, 0] == ir[j, 2]:
                     # derivative with respect to reactant 1
@@ -767,21 +927,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ir[j, 0]] * C[ir[j, 0]]
                     pd[ir[j, 0], ir[j, 1]] -= 2 * deriv
                     pd[ir[j, 1], ir[j, 1]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= 2 * corr
-                        pd[ir[j, 1], i] -= corr
+                    row_corrections[ir[j, 0]] -= 2 * corr
+                    row_corrections[ir[j, 1]] -= corr
 
                     pd[ip[j, 0], ir[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
                 else:
                     # derivative with respect to reactant 1
@@ -813,22 +969,18 @@ cdef class SimpleReactor(ReactionSystem):
                     pd[ir[j, 0], ir[j, 2]] -= deriv
                     pd[ir[j, 1], ir[j, 2]] -= deriv
                     pd[ir[j, 2], ir[j, 2]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] -= corr
-                        pd[ir[j, 1], i] -= corr
-                        pd[ir[j, 2], i] -= corr
+                    row_corrections[ir[j, 0]] -= corr
+                    row_corrections[ir[j, 1]] -= corr
+                    row_corrections[ir[j, 2]] -= corr
 
                     pd[ip[j, 0], ir[j, 2]] += deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] += corr
+                    row_corrections[ip[j, 0]] += corr
                     if ip[j, 1] != -1:
                         pd[ip[j, 1], ir[j, 2]] += deriv
-                        for i in range(num_core_species):
-                            pd[ip[j, 1], i] += corr
+                        row_corrections[ip[j, 1]] += corr
                         if ip[j, 2] != -1:
                             pd[ip[j, 2], ir[j, 2]] += deriv
-                            for i in range(num_core_species):
-                                pd[ip[j, 2], i] += corr
+                            row_corrections[ip[j, 2]] += corr
 
             k = kr[j]
             if ip[j, 1] == -1:  # only one reactant
@@ -847,20 +999,16 @@ cdef class SimpleReactor(ReactionSystem):
                 if ip[j, 0] == ip[j, 1]:
                     deriv = 2 * k * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 0]] -= 2 * deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= 2 * corr
+                    row_corrections[ip[j, 0]] -= 2 * corr
 
                     pd[ir[j, 0], ip[j, 0]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 0]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 0]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
                 else:
                     # Derivative with respect to reactant 1
@@ -878,42 +1026,34 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 1]] -= deriv
                     pd[ip[j, 1], ip[j, 1]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= corr
-                        pd[ip[j, 1], i] -= corr
+                    row_corrections[ip[j, 0]] -= corr
+                    row_corrections[ip[j, 1]] -= corr
 
                     pd[ir[j, 0], ip[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
 
             else:  # three reactants
                 corr = - 2 * k * C[ip[j, 0]] * C[ip[j, 1]] * C[ip[j, 2]] / Ctot
-                if (ip[j, 0] == ip[j, 1] & ip[j, 0] == ip[j, 2]):
+                if ip[j, 0] == ip[j, 1] and ip[j, 0] == ip[j, 2]:
                     deriv = 3 * k * C[ip[j, 0]] * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 0]] -= 3 * deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= 3 * corr
+                    row_corrections[ip[j, 0]] -= 3 * corr
 
                     pd[ir[j, 0], ip[j, 0]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 0]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 0]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
                 elif ip[j, 0] == ip[j, 1]:
                     # derivative with respect to reactant 1
@@ -930,21 +1070,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ip[j, 0]] * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 2]] -= 2 * deriv
                     pd[ip[j, 2], ip[j, 2]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= 2 * corr
-                        pd[ip[j, 2], i] -= corr
+                    row_corrections[ip[j, 0]] -= 2 * corr
+                    row_corrections[ip[j, 2]] -= corr
 
                     pd[ir[j, 0], ip[j, 2]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 2]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 2]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
 
                 elif ip[j, 1] == ip[j, 2]:
@@ -963,21 +1099,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = 2 * k * C[ip[j, 0]] * C[ip[j, 1]]
                     pd[ip[j, 0], ip[j, 1]] -= deriv
                     pd[ip[j, 1], ip[j, 1]] -= 2 * deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= corr
-                        pd[ip[j, 1], i] -= 2 * corr
+                    row_corrections[ip[j, 0]] -= corr
+                    row_corrections[ip[j, 1]] -= 2 * corr
 
                     pd[ir[j, 0], ip[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
                 elif ip[j, 0] == ip[j, 2]:
                     # derivative with respect to reactant 1
@@ -994,21 +1126,17 @@ cdef class SimpleReactor(ReactionSystem):
                     deriv = k * C[ip[j, 0]] * C[ip[j, 0]]
                     pd[ip[j, 0], ip[j, 1]] -= 2 * deriv
                     pd[ip[j, 1], ip[j, 1]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= 2 * corr
-                        pd[ip[j, 1], i] -= corr
+                    row_corrections[ip[j, 0]] -= 2 * corr
+                    row_corrections[ip[j, 1]] -= corr
 
                     pd[ir[j, 0], ip[j, 1]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 1]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 1]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
                 else:
                     # derivative with respect to reactant 1
@@ -1040,22 +1168,27 @@ cdef class SimpleReactor(ReactionSystem):
                     pd[ip[j, 0], ip[j, 2]] -= deriv
                     pd[ip[j, 1], ip[j, 2]] -= deriv
                     pd[ip[j, 2], ip[j, 2]] -= deriv
-                    for i in range(num_core_species):
-                        pd[ip[j, 0], i] -= corr
-                        pd[ip[j, 1], i] -= corr
-                        pd[ip[j, 2], i] -= corr
+                    row_corrections[ip[j, 0]] -= corr
+                    row_corrections[ip[j, 1]] -= corr
+                    row_corrections[ip[j, 2]] -= corr
 
                     pd[ir[j, 0], ip[j, 2]] += deriv
-                    for i in range(num_core_species):
-                        pd[ir[j, 0], i] += corr
+                    row_corrections[ir[j, 0]] += corr
                     if ir[j, 1] != -1:
                         pd[ir[j, 1], ip[j, 2]] += deriv
-                        for i in range(num_core_species):
-                            pd[ir[j, 1], i] += corr
+                        row_corrections[ir[j, 1]] += corr
                         if ir[j, 2] != -1:
                             pd[ir[j, 2], ip[j, 2]] += deriv
-                            for i in range(num_core_species):
-                                pd[ir[j, 2], i] += corr
+                            row_corrections[ir[j, 2]] += corr
 
-        self.jacobian_matrix = pd + cj * np.identity(num_core_species, float)
+        for j in range(num_core_species):
+            if row_corrections[j] != 0.0:
+                for i in range(num_core_species):
+                    pd[j, i] += row_corrections[j]
+
+        # The Jacobian of the rates, without the -cj * I of the residual
+        jacobian_matrix = pd.copy()
+        for j in range(num_core_species):
+            jacobian_matrix[j, j] = pd[j, j] + cj
+        self.jacobian_matrix = jacobian_matrix
         return pd

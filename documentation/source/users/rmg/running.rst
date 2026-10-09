@@ -88,6 +88,22 @@ Details on the multiprocessing implementation
 Currently, multiprocessing is implemented for reaction generation and the generation of QMfiles when using the QMTP option to compute thermodynamic properties of species. The processes are spawned and closed within each function. The number of processes is determined based on the ratio of currently available RAM and currently used RAM. The user can input the maximum number of allowed processes from the command line. For each reaction generation or QMTP call the number of processes will be the minimum value of either the number of allowed processes due to user input or the value obtained by the RAM ratio. The RAM limitation is employed, because multiprocessing is forking the base process and the memory limit (SWAP + RAM) might be exceeded when using too many processors for a base process large in memory.
 
 
+Caching the prepared database
+-----------------------------
+
+Every RMG job loads the RMG database and prepares it (e.g. it adds the rate rules from the kinetics training reactions
+and averages them), which takes about 20-30 seconds. When many jobs are run with the same database settings, this can be
+avoided by setting the environment variable ``RMG_DATABASE_CACHE`` to a directory::
+
+    export RMG_DATABASE_CACHE=$HOME/.rmg/database_cache
+
+The first job then saves the prepared database in that directory (a file of roughly 40-50 MB), and later jobs with the
+same settings load it from there in a few seconds. A cached database is only used if the database files, the RMG-Py code,
+the Python version, and all input file settings that affect the prepared database are unchanged; otherwise a new one is
+prepared and saved. Jobs that use quantum mechanics or machine learning thermo estimation, or the ``kineticsDatastore``
+option, do not use the cache. Old cache files are never deleted automatically, so clear the directory from time to
+time. Jobs using a cached database produce the same model as jobs loading the database from its files.
+
 Details on profiling RMG jobs
 -----------------------------
 

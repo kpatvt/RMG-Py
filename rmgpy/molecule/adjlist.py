@@ -775,7 +775,7 @@ def from_adjacency_list(adjlist, group=False, saturate_h=False, check_consistenc
             atom = GroupAtom(atom_type, unpaired_electrons, partial_charges, label, lone_pairs, sites, morphologies, props)
         else:
             # detect if this is cutting label or atom
-            _ , cutting_label_list = Fragment().detect_cutting_label(atom_type[0])
+            _ , cutting_label_list = Fragment.detect_cutting_label(atom_type[0])
             if cutting_label_list == []:
                 if sites == []:
                     site = ''
@@ -894,6 +894,8 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
         warnings.warn("Support for writing old style adjacency lists has been removed in RMG-Py v3.", RuntimeWarning)
     if not atoms:
         return ''
+    if not group:
+        return _molecule_to_adjacency_list(atoms, multiplicity, metal, facet, label, remove_h)
 
     adjlist = ''
 
@@ -1033,6 +1035,12 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
     atom_type_width = max([len(s) for s in atom_types.values()]) + 1
     atom_unpaired_electrons_width = max([len(s) for s in atom_unpaired_electrons.values()])
 
+    # Positions of the atoms, for sorting the bonded atoms the same way as the atoms
+    # (the atoms are distinct, so this gives the same order as sorting by atoms.index)
+    atom_positions = {}
+    for position, atom in enumerate(atoms):
+        atom_positions.setdefault(atom, position)
+
     # Assemble the adjacency list
     for atom in atoms:
         if atom not in atom_numbers:
@@ -1068,7 +1076,7 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
         # Bonds list
         atoms2 = list(atom.bonds.keys())
         # sort them the same way as the atoms
-        atoms2.sort(key=atoms.index)
+        atoms2.sort(key=atom_positions.__getitem__)
 
         for atom2 in atoms2:
             if atom2 not in atom_numbers:
@@ -1101,6 +1109,97 @@ def to_adjacency_list(atoms, multiplicity, metal='', facet='', label=None, group
         adjlist += '\n'
 
     return adjlist
+
+
+def _molecule_to_adjacency_list(atoms, multiplicity, metal, facet, label, remove_h):
+    """
+    Return the adjacency list of a molecule (not a group), exactly as :func:`to_adjacency_list` writes it.
+
+    The species dictionaries and the seed mechanism are written in every iteration of an RMG job, so this is
+    called for every species many times. It assembles each atom's fields in one pass and joins the parts at the
+    end, instead of building separate dictionaries of fields and concatenating strings.
+    """
+    # Don't remove hydrogen atoms if the molecule consists only of hydrogen atoms
+    try:
+        if remove_h and all([atom.element.symbol == 'H' for atom in atoms]): remove_h = False
+    except AttributeError:
+        pass
+
+    lines = []
+    if label:
+        lines.append(label + '\n')
+    assert isinstance(multiplicity, int), "Molecule should have an integer multiplicity"
+    if multiplicity != 1 or any(atom.radical_electrons for atom in atoms):
+        lines.append('multiplicity {0!r}\n'.format(multiplicity))
+    if metal:
+        lines.append(f"metal {metal}\n")
+    if facet:
+        lines.append(f"facet {facet}\n")
+
+    # The atoms that are written with their numbers, labels, types and remaining atom fields
+    written = []
+    atom_numbers = {}
+    for atom in atoms:
+        if remove_h and atom.symbol == 'H' and atom.label == '':
+            continue
+        atom_numbers[atom] = str(len(written) + 1)
+        written.append(atom)
+
+    numbers = [atom_numbers[atom] for atom in written]
+    labels = ['{0}'.format(atom.label) for atom in written]
+    types = ['{0}'.format(atom.symbol) for atom in written]
+    unpaired = ['{0}'.format(atom.radical_electrons) for atom in written]
+    rest = []
+    for atom in written:
+        charge = atom.charge
+        field = ' p{0} c{1}'.format(str(atom.lone_pairs), '+' + str(charge) if charge > 0 else '' + str(charge))
+        if atom.site:
+            field += ' s"{0}"'.format(atom.site)
+        if atom.morphology:
+            field += ' m"{0}"'.format(atom.morphology)
+        isotope = atom.element.isotope if isinstance(atom, Atom) else atom.isotope
+        if isotope != -1:
+            field += ' i{0}'.format(isotope)
+        rest.append(field)
+
+    # Determine field widths
+    atom_number_width = max([len(s) for s in numbers]) + 1
+    atom_label_width = max([len(s) for s in labels])
+    if atom_label_width > 0:
+        atom_label_width += 1
+    atom_type_width = max([len(s) for s in types]) + 1
+    atom_unpaired_electrons_width = max([len(s) for s in unpaired])
+
+    # Positions of the atoms, for sorting the bonded atoms the same way as the atoms
+    atom_positions = {}
+    for position, atom in enumerate(atoms):
+        atom_positions.setdefault(atom, position)
+
+    for i, atom in enumerate(written):
+        lines.append(numbers[i].ljust(atom_number_width))
+        lines.append(labels[i].ljust(atom_label_width))
+        lines.append(types[i].ljust(atom_type_width))
+        lines.append('u' + unpaired[i].ljust(atom_unpaired_electrons_width))
+        lines.append(rest[i])
+        bonds = atom.bonds
+        atoms2 = list(bonds.keys())
+        atoms2.sort(key=atom_positions.__getitem__)
+        for atom2 in atoms2:
+            number = atom_numbers.get(atom2)
+            if number is None:
+                continue
+            bond = bonds[atom2]
+            # preference is for string representation, backs down to number
+            try:
+                order = bond.get_order_str()
+            except (ValueError, TypeError):
+                order = None
+            if order is None:
+                order = str(bond.get_order_num())
+            lines.append(' {' + number + ',' + order + '}')
+        lines.append('\n')
+
+    return ''.join(lines)
 
 
 def get_old_electron_state(atom):

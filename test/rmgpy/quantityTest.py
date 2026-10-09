@@ -1198,3 +1198,35 @@ class TestQuantityDictionaryConversion:
         assert minimal_array.as_dict() == self.minimal_array.as_dict()
         assert known_array.as_dict() == self.known_array.as_dict()
         assert uncertain_array.as_dict() == self.uncertain_array.as_dict()
+
+
+class TestExactCopies:
+    """
+    Copying or pickling a quantity must not change its value (converting the SI
+    value to the given units and back is not exact).
+    """
+
+    def test_scalar_copies_are_exact(self):
+        import pickle
+        q = quantity.Enthalpy(72.893, "kcal/mol", "+|-", 1.33015)
+        assert q.value_si != q.value * 4184  # the round trip would not be exact
+        for copy in (q.copy(), quantity.Enthalpy(q), quantity.Quantity(q), pickle.loads(pickle.dumps(q))):
+            assert copy is not q
+            assert copy.value_si == q.value_si
+            assert copy.uncertainty_si == q.uncertainty_si
+            assert copy.units == q.units
+            assert copy.uncertainty_type == q.uncertainty_type
+
+    def test_array_copies_are_exact(self):
+        import pickle
+        q = quantity.HeatCapacity([7.0149, 8.1422, 9.0999], "cal/(mol*K)", "*|/", [1.1, 1.2, 1.3])
+        for copy in (q.copy(), quantity.HeatCapacity(q), quantity.Quantity(q), pickle.loads(pickle.dumps(q))):
+            assert copy is not q
+            assert copy.value_si is not q.value_si
+            assert copy.value_si.tolist() == q.value_si.tolist()
+            assert copy.uncertainty_si.tolist() == q.uncertainty_si.tolist()
+            assert copy.units == q.units
+            assert copy.uncertainty_type == q.uncertainty_type
+        copy = q.copy()
+        copy.value_si[0] = 0.0
+        assert q.value_si[0] != 0.0

@@ -293,9 +293,12 @@ class MetalDatabase(object):
     def save_libraries(self, path):
         """
         Save the metal libraries to the given `path` on disk, where `path`
-        points to the top-level folder of the metal libraries.
+        is the file of the metal library (e.g. ``libraries/metal.py``).
         """
-        if not os.path.exists(path):
-            os.mkdir(path)
+        # `path` is the library file, so create the folder containing it if needed
+        # (creating a folder named like the file made the library impossible to save there)
+        directory = os.path.dirname(path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
         for library in self.libraries.keys():
             self.libraries[library].save(path)

@@ -226,3 +226,29 @@ class ReactionSystemTest:
         assert rxn_sys.P.value_si == rxn_sys1.P.value_si
         assert rxn_sys.termination[0].conversion == rxn_sys1.termination[0].conversion
         assert rxn_sys.termination[1].time.value_si == rxn_sys1.termination[1].time.value_si
+
+    def test_set_prunable_indices_keeps_ratios_aligned(self):
+        """
+        Test that the prunable species indices stay aligned with the list of prunable species
+        when some of them are no longer in the edge (e.g. because they were moved to the core),
+        so that each maximum rate ratio is recorded for the right species.
+        """
+        import numpy as np
+
+        reaction_system = self.rmg.reaction_systems[0]
+        # Any species objects will do, since set_prunable_indices matches them by identity
+        species = self.rmg.reaction_model.core.species[:3]
+        assert len(species) == 3
+        edge_species = [species[0], species[2]]
+        moved_to_core = species[1]
+
+        reaction_system.prunable_species = [edge_species[0], moved_to_core, edge_species[1]]
+        reaction_system.max_edge_species_rate_ratios = np.zeros(3, float)
+        reaction_system.prunable_networks = []
+        reaction_system.max_network_leak_rate_ratios = np.zeros(0, float)
+        reaction_system.set_prunable_indices(edge_species, [])
+
+        assert list(reaction_system.prunable_species_indices) == [0, -1, 1]
+        assert reaction_system.max_edge_species_rate_ratios[0] == 0.0
+        assert reaction_system.max_edge_species_rate_ratios[1] == np.inf
+        assert reaction_system.max_edge_species_rate_ratios[2] == 0.0

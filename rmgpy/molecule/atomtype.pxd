@@ -30,6 +30,7 @@ cdef class AtomType:
     cdef public str label
     cdef public list generic
     cdef public list specific
+    cdef frozenset _specific_labels
 
     cdef public list increment_bond
     cdef public list decrement_bond
@@ -56,6 +57,8 @@ cdef class AtomType:
     cpdef bint is_specific_case_of(self, AtomType other)
 
     cpdef bint equivalent(self, AtomType other)
+
+    cpdef frozenset _get_specific_labels(self)
 
     cpdef list get_features(self)
 

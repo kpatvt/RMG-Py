@@ -1131,7 +1131,8 @@ Each accepts ``True``, ``False``, or a Python dict with optional keys:
 
 * ``'saveInterval'`` *(int)* — positive N writes every N iterations (iteration
   numbering starts at 0); ``-1`` writes only at the very end of the run.
-  Defaults to ``1`` (every iteration) for writers that are on by default.
+  Defaults to ``1`` (every iteration) for the Chemkin writer and to ``-1`` (end
+  of the run only) for the RMS YAML writer.
 * ``'saveEdge'`` *(bool, optional)* — overrides the global ``saveEdgeSpecies``
   flag for this writer only.
 
@@ -1153,6 +1154,10 @@ Examples::
 
 ``generateRMSYAML`` (default ``True``)
   Controls the RMS YAML writer.  Output is written to the ``rms/`` folder.
+  By default (and with ``True``) the file is only written at the end of the run,
+  since writing it every iteration takes a large fraction of the run time for
+  big models; use ``generateRMSYAML={'saveInterval': 1}`` to also get a file
+  for every iteration, as in earlier versions.
 
 ``generateCanteraYAML1`` (default ``False``) *(beta)*
   Controls the *direct* Cantera YAML v1 writer.  Output is written to the

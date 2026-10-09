@@ -82,6 +82,22 @@ cdef class VF2:
         self.isomorphism(graph1, graph2, initial_mapping, False, True, save_order=save_order, strict=strict)
         return self.mapping_list
 
+    cpdef dict find_first_isomorphism(self, Graph graph1, Graph graph2, dict initial_mapping, bint save_order=False,
+                                      bint strict=True):
+        """
+        Return the first valid isomorphism mapping (as a dict) from graph `graph1` to graph `graph2`
+        found with the optional initial mapping `initial_mapping`, or ``None`` if the graphs are not
+        isomorphic. Unlike :meth:`find_isomorphism`, this stops at the first mapping.
+        """
+        self.record_first = True
+        try:
+            self.isomorphism(graph1, graph2, initial_mapping, False, False, save_order=save_order, strict=strict)
+        finally:
+            self.record_first = False
+        if self.is_match and self.mapping_list:
+            return self.mapping_list[0]
+        return None
+
     cpdef bint is_subgraph_isomorphic(self, Graph graph1, Graph graph2, dict initial_mapping,
                                       bint save_order=False) except -2:
         """
@@ -194,7 +210,7 @@ cdef class VF2:
 
         # Done if we have mapped to all vertices in graph
         if call_depth == 0:
-            if self.find_all:
+            if self.find_all or self.record_first:
                 mapping = {}
                 for vertex2 in self.graph2.vertices:
                     if vertex2.ignore:

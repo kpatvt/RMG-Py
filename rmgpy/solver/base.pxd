@@ -35,6 +35,15 @@ else:
 
 ################################################################################
 
+# Helpers for the residual and simulation loops (see base.pyx)
+cdef double pairwise_sum(double * a, Py_ssize_t n) noexcept nogil
+cdef np.ndarray zeros_array(Py_ssize_t n)
+cdef double * float_data(np.ndarray a, Py_ssize_t n) except NULL
+cdef long * int_data(np.ndarray a, Py_ssize_t n) except NULL
+cdef int check_indices(long * indices, Py_ssize_t num_species) except -1
+
+################################################################################
+
 cdef class ReactionSystem(DASx):
 
     # reactor state variables:
@@ -81,6 +90,10 @@ cdef class ReactionSystem(DASx):
 
     cdef public np.ndarray network_leak_rates    
 
+    # The core species concentrations of the last residual evaluation, if the edge rates still need to be
+    # calculated from them (see update_edge_rates)
+    cdef public np.ndarray edge_rate_concentrations
+
     # variables that cache maximum rate (ratio) data
     cdef public np.ndarray max_edge_species_rate_ratios
     cdef public np.ndarray max_network_leak_rate_ratios
@@ -123,6 +136,8 @@ cdef class ReactionSystem(DASx):
         list edge_reactions,list surface_species, list surface_reactions,
         list pdep_networks=?, bool prune=?, bool sensitivity=?, list sens_worksheet=?, object model_settings=?,
         object simulator_settings=?, dict conditions=?)
+
+    cpdef update_edge_rates(self)
 
     cpdef log_rates(self, double char_rate, object species, double species_rate, double max_dif_ln_accum_num, object network, double network_rate)
      

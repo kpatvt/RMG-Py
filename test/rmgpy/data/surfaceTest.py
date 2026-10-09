@@ -74,8 +74,8 @@ class TestMetalDatabase:
         assert repr(self.database.get_binding_energies(test_entry.label)) == repr(test_entry.binding_energies)
         assert repr(self.database.get_surface_site_density(test_entry.label)) == repr(test_entry.surface_site_density)
 
-    def test_write_entry_to_database(self):
-        """Test we can write an entry to the database"""
+    def test_write_entry_to_database(self, tmp_path):
+        """Test we can write an entry to the database (in a temporary folder, not the RMG-database checkout)"""
 
         test_entry = Entry(
             index=100,
@@ -103,18 +103,16 @@ class TestMetalDatabase:
         assert repr(self.database.get_surface_site_density(test_entry.label)) == repr(test_entry.surface_site_density)
 
         # write the new entry
-        self.database.save(os.path.join(settings["database.directory"], "surface"))
-        # MetalLib.save_entry(os.path.join(settings['database.directory'], 'surface/libraries/metal.py'), test_entry)
+        surface_path = os.path.join(str(tmp_path), "surface")
+        try:
+            self.database.save(surface_path)
+        finally:
+            # restore the loaded database for the other tests
+            self.database.remove_entry(test_entry)
 
         # test to see if entry was written
-        with open(
-            os.path.join(settings["database.directory"], "surface/libraries/metal.py"),
-            "r",
-        ) as f:
-            if "Me111" in f.read():
-                self.database.remove_entry(test_entry)
-                self.database.save(os.path.join(settings["database.directory"], "surface"))
-            else:
+        with open(os.path.join(surface_path, "libraries", "metal.py"), "r") as f:
+            if "Me111" not in f.read():
                 raise DatabaseError("Unable to write entry to database.")
 
     def test_load_from_label(self):

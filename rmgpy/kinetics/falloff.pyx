@@ -93,10 +93,29 @@ cdef class ThirdBody(PDepKineticsModel):
         first use :meth:`get_effective_pressure()` to compute the effective
         pressure, and pass that value as the pressure to this method.
         """
+        cdef double terms[1]
+
+        self.get_temperature_terms(T, terms)
+        return self.get_rate_from_terms(T, P, terms)
+
+    cdef int get_temperature_terms(self, double T, double * terms) except -1:
+        """
+        Set `terms` to the parts of the rate coefficient that only depend on the temperature `T` (the low-pressure
+        rate coefficient), for :meth:`get_rate_from_terms`. A reactor at constant temperature can calculate these
+        once instead of for every pressure.
+        """
+        terms[0] = self.arrheniusLow.get_rate_coefficient(T)
+        return 0
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1:
+        """
+        Return the rate coefficient at temperature `T` and pressure `P`, given the `terms` calculated for `T`
+        by :meth:`get_temperature_terms`.
+        """
         cdef double C, k0
 
         C = P / constants.R / T  # bath gas concentration in mol/m^3
-        k0 = self.arrheniusLow.get_rate_coefficient(T)
+        k0 = terms[0]
 
         return k0 * C
 
@@ -186,11 +205,31 @@ cdef class Lindemann(PDepKineticsModel):
         first use :meth:`get_effective_pressure()` to compute the effective
         pressure, and pass that value as the pressure to this method.
         """
+        cdef double terms[2]
+
+        self.get_temperature_terms(T, terms)
+        return self.get_rate_from_terms(T, P, terms)
+
+    cdef int get_temperature_terms(self, double T, double * terms) except -1:
+        """
+        Set `terms` to the parts of the rate coefficient that only depend on the temperature `T` (the low- and
+        high-pressure rate coefficients), for :meth:`get_rate_from_terms`. A reactor at constant temperature can
+        calculate these once instead of for every pressure.
+        """
+        terms[0] = self.arrheniusLow.get_rate_coefficient(T)
+        terms[1] = self.arrheniusHigh.get_rate_coefficient(T)
+        return 0
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1:
+        """
+        Return the rate coefficient at temperature `T` and pressure `P`, given the `terms` calculated for `T`
+        by :meth:`get_temperature_terms`.
+        """
         cdef double C, k0, kinf, Pr
 
         C = P / constants.R / T  # bath gas concentration in mol/m^3
-        k0 = self.arrheniusLow.get_rate_coefficient(T)
-        kinf = self.arrheniusHigh.get_rate_coefficient(T)
+        k0 = terms[0]
+        kinf = terms[1]
         Pr = k0 * C / kinf
 
         return kinf * (Pr / (1 + Pr))
@@ -337,14 +376,23 @@ cdef class Troe(PDepKineticsModel):
         first use :meth:`get_effective_pressure()` to compute the effective
         pressure, and pass that value as the pressure to this method.
         """
-        cdef double C, k0, kinf, Pr
-        cdef double d, n, c, Fcent, F
+        cdef double terms[4]
+
+        self.get_temperature_terms(T, terms)
+        return self.get_rate_from_terms(T, P, terms)
+
+    cdef int get_temperature_terms(self, double T, double * terms) except -1:
+        """
+        Set `terms` to the parts of the rate coefficient that only depend on the temperature `T` (the low- and
+        high-pressure rate coefficients, whether there is a broadening factor, and its center), for
+        :meth:`get_rate_from_terms`. A reactor at constant temperature can calculate these once instead of for
+        every pressure.
+        """
+        cdef double Fcent
         cdef double alpha, T1, T2, T3
 
-        C = P / constants.R / T  # bath gas concentration in mol/m^3
-        k0 = self.arrheniusLow.get_rate_coefficient(T)
-        kinf = self.arrheniusHigh.get_rate_coefficient(T)
-        Pr = k0 * C / kinf
+        terms[0] = self.arrheniusLow.get_rate_coefficient(T)
+        terms[1] = self.arrheniusHigh.get_rate_coefficient(T)
 
         alpha = self.alpha
         T1 = self._T1.value_si if self._T1 is not None else 0.0
@@ -352,10 +400,32 @@ cdef class Troe(PDepKineticsModel):
         T3 = self._T3.value_si if self._T3 is not None else 0.0
 
         if T1 == 0 and T3 == 0:
-            F = 1.0
+            terms[2] = 0.0
+            terms[3] = 0.0
         else:
             Fcent = (1 - alpha) * exp(-T / T3) + alpha * exp(-T / T1)
             if T2 != 0.0: Fcent += exp(-T2 / T)
+            terms[2] = 1.0
+            terms[3] = Fcent
+        return 0
+
+    cdef double get_rate_from_terms(self, double T, double P, double * terms) except -1:
+        """
+        Return the rate coefficient at temperature `T` and pressure `P`, given the `terms` calculated for `T`
+        by :meth:`get_temperature_terms`.
+        """
+        cdef double C, k0, kinf, Pr
+        cdef double d, n, c, Fcent, F
+
+        C = P / constants.R / T  # bath gas concentration in mol/m^3
+        k0 = terms[0]
+        kinf = terms[1]
+        Pr = k0 * C / kinf
+
+        if terms[2] == 0.0:
+            F = 1.0
+        else:
+            Fcent = terms[3]
             d = 0.14
             n = 0.75 - 1.27 * log10(Fcent)
             c = -0.4 - 0.67 * log10(Fcent)
