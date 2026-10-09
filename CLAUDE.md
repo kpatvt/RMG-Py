@@ -48,6 +48,7 @@ Cython conventions in this repo:
 - Pair every public `cdef class` / `cpdef` method with a `.pxd` declaration.
 - New extension files **must be added to `ext_modules` in `setup.py`** or they will silently not be built.
 - The DASPK/DASSL solver is selected at compile time via `rmgpy/solver/settings.pxi` (auto-written by `utilities.py check-pydas` from whatever PyDAS variant is installed). Do not commit changes to `settings.pxi`.
+- Per-module compiler flags go in a `# distutils: extra_compile_args = ...` comment in the module's header (before any code). `rmgpy/solver/simple.pyx` uses `-O3` so that GCC vectorizes the Jacobian's row loops; this does not change floating point results (no `-ffast-math`).
 - macOS-specific: `setup.py` deduplicates `-Wl,-rpath` flags from sysconfig before invoking Cython, to work around an LC_RPATH issue with conda-forge's Python on darwin. Don't remove that block.
 
 ## Tests
@@ -89,8 +90,14 @@ Two more pitfalls when running tests (or RMG/Arkane jobs) in parallel:
 Separate from pytest. Each `test/regression/<name>/` has an `input.py`. CI runs `python rmg.py test/regression/<name>/input.py` and diffs core/edge models against artifacts produced on `main`. Locally you can reproduce a single one:
 ```bash
 python rmg.py test/regression/superminimal/input.py
-python scripts/checkModels.py ...   # (see .github/workflows/CI.yml for arg shape)
+python scripts/checkModels.py <name>-core <ref>/chemkin/chem_annotated.inp <ref>/chemkin/species_dictionary.txt \
+    test/regression/<name>/chemkin/chem_annotated.inp test/regression/<name>/chemkin/species_dictionary.txt
+python scripts/checkModels.py <name>-edge <ref>/chemkin/chem_edge_annotated.inp <ref>/chemkin/species_edge_dictionary.txt \
+    test/regression/<name>/chemkin/chem_edge_annotated.inp test/regression/<name>/chemkin/species_edge_dictionary.txt
+python rmgpy/tools/regression.py test/regression/<name>/regression_input.py <ref>/chemkin test/regression/<name>/chemkin  # if the test has a regression_input.py
 ```
+`<ref>` is the output of the same test run with `main` (CI downloads it as an artifact). `checkModels.py` writes `<name>-core.log`/`<name>-edge.log` and exits non-zero on differences. The `RMS_*` tests need RMS/Julia (`./install_rms.sh`). Running a test writes its output into `test/regression/<name>/`; copy the directory elsewhere to keep the checkout clean.
+
 Adding a new regression test means editing the **two lists** in [.github/workflows/CI.yml](.github/workflows/CI.yml) (Execution + Comparison steps); the first PR will fail CI until baseline artifacts exist on `main`.
 
 The `Makefile` also has `eg0`-`eg10` targets that copy example inputs into `testing/<name>/` and run `rmg.py` — useful for ad-hoc end-to-end smoke testing (`eg0` is fastest).
@@ -102,6 +109,15 @@ The `Makefile` also has `eg0`-`eg10` targets that copy example inputs into `test
 **Shadow reactions in reaction generation**: `KineticsFamily._generate_reactions()` returns `ShadowReaction` placeholders (see [rmgpy/data/kinetics/common.py](rmgpy/data/kinetics/common.py)) for template mappings related to an earlier one by a symmetry of the reactant, when called with `compress_symmetric=True` (by `generate_reactions_from_families`, `calculate_degeneracy` and `add_reverse_attribute`). Only `find_degenerate_reactions()` handles them, and it removes them. If you change product generation, the checks in `_generate_reactions`, or `find_degenerate_reactions`, keep the two paths equivalent: set `rmgpy.data.kinetics.family.SYMMETRY_COMPRESSION = False` to compare against plain generation (`test/rmgpy/data/kinetics/symmetryCompressionTest.py` does this). Side effects on the shared reactant molecules (atom order from VF2 sorting, leftover atom labels) are observable downstream and must stay the same. The same switch also turns off `_ProductConnectivityFilter`, which skips mappings whose products cannot match the `products` requested from `_generate_reactions()` (it must only reject mappings that the final `same_species_lists(..., strict=False)` check would reject).
 
 **Ring perception cache**: `Molecule.get_smallest_set_of_smallest_rings()` caches rings (as atom indices) by `Molecule._ring_perception_key()`, which lists everything `to_rdkit_mol(..., ignore_bond_orders=True)` passes to RDKit plus the bond topology. If you change what `to_rdkit_mol` encodes per atom or bond, update that key too, or molecules could get rings computed for a different RDKit input.
+
+**Reactor residual and Jacobian (`rmgpy/solver/`)**: `SimpleReactor.residual()` and the per-step analysis in `ReactionSystem.simulate()` are written to give results bit-identical to straightforward numpy code. Keep it that way, or say so explicitly in the commit, because any change in rounding shifts DASPK's steps and can change which species enter the model:
+- Use `pairwise_sum()` (declared in `base.pxd`), which reproduces numpy's pairwise summation exactly, wherever `np.sum()` was used; a plain loop rounds differently. Elementwise operations in C loops are exact.
+- Arrays are accessed through pointers from `float_data()`/`int_data()`, which check type, contiguity and size. The species index arrays (`reactant_indices`, `product_indices`, `network_indices`) are validated once per array object, so create new arrays instead of modifying them in place after `initialize_model()`.
+- `ThirdBody`/`Lindemann`/`Troe.get_rate_coefficient()` are built from `get_temperature_terms()` and `get_rate_from_terms()`; the simple reactor caches the temperature terms per temperature and `pdep_collider_kinetics` list (reset in `set_colliders()`). Change the two methods together.
+- `generate_rate_coefficients()` runs inside a `species_value_cache` (in `rmgpy/species.py`), which stores each species' free energy and `contains_surface_site()`; thermo and structures must not change inside it.
+- The analytical Jacobian sums the volume terms (the derivatives through V, the same for all columns of a row) once per row. `test_jacobian_repeated_reactants` in `test/rmgpy/solver/simpleTest.py` and `liquidTest.py` compares the Jacobians with finite differences of the residual for all reactant/product patterns; run it after changing either. Changing the Jacobian's summation order changes trajectories within the solver tolerance, not bit-identically.
+- To check that a solver change keeps the model, compare not only the Chemkin files but also the flux decisions in `RMG.log` (`grep -E "At time|reached target|terminating simulation"`), which include every rate ratio in full precision.
+- PyDAS (an external package) copies the Jacobian returned to DASPK with an untyped Python loop, which costs about as much as computing it; fixing that requires a PyDAS release.
 
 ### Profiling
 
