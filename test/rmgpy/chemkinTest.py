@@ -518,6 +518,30 @@ class ChemkinTest:
             save_chemkin_file(str(tmp_path / "x.inp"), species, reactions, verbose=False,
                               check_for_duplicates=False, plain_path=str(tmp_path / "y.inp"))
 
+    def test_long_comments_are_wrapped(self):
+        """
+        Test that comment lines longer than 150 characters are wrapped like textwrap does, also when the same
+        comment is written again (the wrapped lines are stored).
+        """
+        import textwrap
+
+        comment = " ".join("word{0}".format(i) for i in range(80)) + "\nshort second line"
+        species = [Species().from_smiles("CC"), Species().from_smiles("[CH3]")]
+        reaction = Reaction(
+            reactants=[species[0]],
+            products=[species[1], species[1]],
+            kinetics=Arrhenius(A=(1e10, "s^-1"), n=0, Ea=(10, "kJ/mol"), T0=(1, "K"), comment=comment),
+        )
+        long_line = comment.split("\n")[0]
+        expected = ["! {0}".format(line) for line in textwrap.fill(long_line, 150).split("\n")]
+        expected.append("! short second line")
+        assert len(expected) > 2
+        entries = [write_kinetics_entry(reaction, species_list=species, verbose=True) for _ in range(3)]
+        assert entries[0] == entries[1] == entries[2]
+        lines = entries[0].split("\n")
+        start = lines.index(expected[0])
+        assert lines[start:start + len(expected)] == expected
+
     def test_mark_new_duplicate_reactions(self):
         """
         Test that mark_new_duplicate_reactions() gives the same flags as marking each new reaction with

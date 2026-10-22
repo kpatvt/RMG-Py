@@ -1593,6 +1593,23 @@ def _get_species_identifier(species):
 ################################################################################
 
 
+# The wrapped lines of the comment lines that are longer than the Chemkin line limit. The same long comments are
+# written again in every iteration, and wrapping text with textwrap is slow. The lists must not be modified.
+_wrapped_comment_lines = {}
+
+
+def _wrap_comment_line(line):
+    """
+    Return the list of lines that the comment `line` is wrapped into, i.e. ``textwrap.fill(line, 150).split("\n")``.
+    """
+    wrapped = _wrapped_comment_lines.get(line)
+    if wrapped is None:
+        if len(_wrapped_comment_lines) >= 20000:
+            _wrapped_comment_lines.clear()
+        wrapped = _wrapped_comment_lines[line] = textwrap.fill(line, 150).split("\n")
+    return wrapped
+
+
 def write_thermo_entry(species, element_counts=None, bint verbose=True):
     """
     Return a string representation of the NASA model readable by Chemkin.
@@ -1663,7 +1680,7 @@ def write_thermo_entry(species, element_counts=None, bint verbose=True):
         if thermo.comment:
             for line in thermo.comment.strip().split("\n"):
                 if len(line) > 150:
-                    short_lines = textwrap.fill(line, 150).split("\n")
+                    short_lines = _wrap_comment_line(line)
                     for short_line in short_lines:
                         string += "! {0}\n".format(short_line)
                 else:
@@ -1874,7 +1891,7 @@ def write_kinetics_entry(reaction, species_list, verbose=True, java_library=Fals
         if reaction.kinetics.comment:
             for line in reaction.kinetics.comment.split("\n"):
                 if len(line) > 150:
-                    short_lines = textwrap.fill(line, 150).split("\n")
+                    short_lines = _wrap_comment_line(line)
                     for short_line in short_lines:
                         string += "! {0}\n".format(short_line)
                 else:
