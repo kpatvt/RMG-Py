@@ -272,6 +272,32 @@ class _ProductConnectivityFilter(object):
 # reactions (see ShadowReaction) where the caller allows it. This does not change the results.
 SYMMETRY_COMPRESSION = True
 
+# While a template_surface_site_memo is active, whether a template group contains a surface site is looked up
+# once for each group: group id -> (group, result)
+_surface_site_memo = None
+
+
+class template_surface_site_memo(object):
+    """
+    A context manager during which :meth:`KineticsFamily._template_contains_surface_site` stores its results, so
+    that they are only looked up once for each template group (the lookup has to check that the group is unchanged).
+    The template groups must not change while it is active, which is the case while reactions are generated.
+    The memo of an enclosing context is used if there is one.
+    """
+
+    def __enter__(self):
+        global _surface_site_memo
+        self.created = _surface_site_memo is None
+        if self.created:
+            _surface_site_memo = {}
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        global _surface_site_memo
+        if self.created:
+            _surface_site_memo = None
+        return False
+
 ################################################################################
 
 
@@ -2015,6 +2041,21 @@ class KineticsFamily(Database):
         Return ``group.contains_surface_site()`` for a template group, cached while `group` is the
         same object with the same atoms and atom types.
         """
+        memo = _surface_site_memo
+        if memo is not None:
+            # While reactions are generated, the groups stay as they are. The group is stored with its
+            # result so that its id cannot be reused by another group while the memo exists.
+            entry = memo.get(id(group))
+            if entry is None:
+                entry = memo[id(group)] = (group, self._template_contains_surface_site_checked(group))
+            return entry[1]
+        return self._template_contains_surface_site_checked(group)
+
+    def _template_contains_surface_site_checked(self, group):
+        """
+        Return ``group.contains_surface_site()`` for a template group, cached while `group` is the
+        same object with the same atoms and atom types.
+        """
         cache = self.__dict__.setdefault('_template_surface_sites', {})
         atom_ids = [(id(atom), tuple([id(atomtype) for atomtype in atom.atomtype])) for atom in group.atoms]
         cached = cache.get(id(group))
@@ -2278,6 +2319,24 @@ class KineticsFamily(Database):
     def _generate_reactions(self, reactants, products=None, forward=True, prod_resonance=True,
                             react_non_reactive=False, delete_labels=True, relabel_atoms=True,
                             compress_symmetric=False):
+        """
+        Generate a list of all the possible reactions of this family between the list of `reactants`,
+        see :meth:`_generate_template_reactions`, which has the arguments and the description.
+
+        The template groups of the family do not change while the reactions are generated, so whether
+        they contain a surface site is only looked up once for each group (see
+        :class:`template_surface_site_memo`).
+        """
+        with template_surface_site_memo():
+            return self._generate_template_reactions(reactants, products=products, forward=forward,
+                                                     prod_resonance=prod_resonance,
+                                                     react_non_reactive=react_non_reactive,
+                                                     delete_labels=delete_labels, relabel_atoms=relabel_atoms,
+                                                     compress_symmetric=compress_symmetric)
+
+    def _generate_template_reactions(self, reactants, products=None, forward=True, prod_resonance=True,
+                                     react_non_reactive=False, delete_labels=True, relabel_atoms=True,
+                                     compress_symmetric=False):
         """
         Generate a list of all the possible reactions of this family between
         the list of `reactants`. The number of reactants provided must match

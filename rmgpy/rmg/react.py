@@ -33,6 +33,7 @@ Contains functions for generating reactions.
 import logging
 from multiprocessing import Pool
 
+from rmgpy.data.kinetics.family import template_surface_site_memo
 from rmgpy.data.rmg import get_db
 
 
@@ -61,15 +62,18 @@ def react(spc_fam_tuples, procnum=1):
     # Execute multiprocessing map. It blocks until the result is ready.
     # This method chops the iterable into a number of chunks which it
     # submits to the process pool as separate tasks.
-    if procnum == 1:
-        logging.info('For reaction generation {0} process is used.'.format(procnum))
-        reactions = list(map(_react_species_star, spc_fam_tuples))
-    else:
-        logging.info('For reaction generation {0} processes are used.'.format(procnum))
-        p = Pool(processes=procnum)
-        reactions = p.map(_react_species_star, spc_fam_tuples)
-        p.close()
-        p.join()
+    # The template groups of the families do not change while reactions are generated, so each group is only
+    # checked for surface sites once (the worker processes get a copy of the empty memo)
+    with template_surface_site_memo():
+        if procnum == 1:
+            logging.info('For reaction generation {0} process is used.'.format(procnum))
+            reactions = list(map(_react_species_star, spc_fam_tuples))
+        else:
+            logging.info('For reaction generation {0} processes are used.'.format(procnum))
+            p = Pool(processes=procnum)
+            reactions = p.map(_react_species_star, spc_fam_tuples)
+            p.close()
+            p.join()
 
     return reactions
 
