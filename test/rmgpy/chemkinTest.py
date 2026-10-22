@@ -485,6 +485,39 @@ class ChemkinTest:
         assert isinstance(rtest.kinetics, MultiArrhenius)
         assert all(isinstance(k, Arrhenius) for k in rtest.kinetics.arrhenius)
 
+    @pytest.mark.parametrize("model", ["minimal", "NC", "pdd"])
+    def test_save_chemkin_file_with_plain_version(self, tmp_path, model):
+        """
+        Test that save_chemkin_file() with a plain_path gives the same two files as saving the annotated and
+        the plain file with separate calls.
+        """
+        folder = os.path.join(os.path.dirname(__file__), "test_data", "chemkin", "chemkin_py", model)
+        species, reactions = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                               os.path.join(folder, "species_dictionary.txt"))
+        separate_annotated = str(tmp_path / "separate_annotated.inp")
+        separate_plain = str(tmp_path / "separate_plain.inp")
+        save_chemkin_file(separate_plain, species, reactions, verbose=False, check_for_duplicates=False)
+        save_chemkin_file(separate_annotated, species, reactions, verbose=True, check_for_duplicates=False)
+        together_annotated = str(tmp_path / "together_annotated.inp")
+        together_plain = str(tmp_path / "together_plain.inp")
+        save_chemkin_file(together_annotated, species, reactions, verbose=True, check_for_duplicates=False,
+                          plain_path=together_plain)
+
+        with open(separate_annotated) as f, open(together_annotated) as g:
+            annotated = f.read()
+            assert annotated == g.read()
+        with open(separate_plain) as f, open(together_plain) as g:
+            plain = f.read()
+            assert plain == g.read()
+        # The annotated file does have comments that the plain file does not
+        assert annotated != plain
+        assert not any(line.startswith("!") for line in plain.split("\n"))
+
+        # The plain version can only be made from the annotated version
+        with pytest.raises(ValueError):
+            save_chemkin_file(str(tmp_path / "x.inp"), species, reactions, verbose=False,
+                              check_for_duplicates=False, plain_path=str(tmp_path / "y.inp"))
+
     def test_mark_new_duplicate_reactions(self):
         """
         Test that mark_new_duplicate_reactions() gives the same flags as marking each new reaction with
