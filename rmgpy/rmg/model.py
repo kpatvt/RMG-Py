@@ -821,15 +821,12 @@ class CoreEdgeReactionModel:
         new_core_reactions = self.core.reactions[num_old_core_reactions:]
         new_edge_reactions = self.edge.reactions[num_old_edge_reactions:]
         checked_reactions = self.core.reactions[:num_old_core_reactions] + self.edge.reactions[:num_old_edge_reactions]
-        from rmgpy.chemkin import mark_duplicate_reaction
+        from rmgpy.chemkin import mark_new_duplicate_reactions
 
-        for rxn in new_core_reactions:
-            mark_duplicate_reaction(rxn, checked_reactions)
-            checked_reactions.append(rxn)
         if self.save_edge_species:
-            for rxn in new_edge_reactions:
-                mark_duplicate_reaction(rxn, checked_reactions)
-                checked_reactions.append(rxn)
+            mark_new_duplicate_reactions(new_core_reactions + new_edge_reactions, checked_reactions)
+        else:
+            mark_new_duplicate_reactions(new_core_reactions, checked_reactions)
         self.log_enlarge_summary(
             new_core_species=self.core.species[num_old_core_species:],
             new_core_reactions=self.core.reactions[num_old_core_reactions:],
@@ -1928,13 +1925,11 @@ class CoreEdgeReactionModel:
                 self.add_reaction_to_edge(rxn, requires_rms=requires_rms)
 
         if self.save_edge_species:
-            from rmgpy.chemkin import mark_duplicate_reaction
+            from rmgpy.chemkin import mark_new_duplicate_reactions
 
             new_edge_reactions = self.edge.reactions[num_old_edge_reactions:]
             checked_reactions = self.core.reactions + self.edge.reactions[:num_old_edge_reactions]
-            for rxn in new_edge_reactions:
-                mark_duplicate_reaction(rxn, checked_reactions)
-                checked_reactions.append(rxn)
+            mark_new_duplicate_reactions(new_edge_reactions, checked_reactions)
 
         self.log_enlarge_summary(
             new_core_species=[],

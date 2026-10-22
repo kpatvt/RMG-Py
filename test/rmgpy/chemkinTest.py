@@ -37,7 +37,9 @@ from rmgpy.chemkin import (
     get_species_identifier,
     load_chemkin_file,
     load_transport_file,
+    mark_duplicate_reaction,
     mark_duplicate_reactions,
+    mark_new_duplicate_reactions,
     read_kinetics_entry,
     read_reaction_comments,
     read_thermo_block,
@@ -56,6 +58,7 @@ from rmgpy.exceptions import ChemkinError
 from rmgpy.kinetics.arrhenius import Arrhenius, MultiArrhenius
 from rmgpy.kinetics.chebyshev import Chebyshev
 from rmgpy.reaction import Reaction
+from rmgpy.molecule import Molecule
 from rmgpy.species import Species
 from rmgpy.thermo import NASA, NASAPolynomial
 from rmgpy.transport import TransportData
@@ -481,6 +484,66 @@ class ChemkinTest:
         assert rtest.library == rtrue.library
         assert isinstance(rtest.kinetics, MultiArrhenius)
         assert all(isinstance(k, Arrhenius) for k in rtest.kinetics.arrhenius)
+
+    def test_mark_new_duplicate_reactions(self):
+        """
+        Test that mark_new_duplicate_reactions() gives the same flags as marking each new reaction with
+        mark_duplicate_reaction() and appending it to the checked reactions, for random lists of reactions.
+        """
+        import random
+
+        species = [Species().from_smiles(smiles) for smiles in ("CC", "[CH3]", "[OH]", "C[CH2]", "O")]
+        generator = random.Random(0)
+
+        def random_reaction(recipe):
+            reactants, products, reversible, duplicate, chebyshev = recipe
+            return Reaction(
+                reactants=[species[i] for i in reactants],
+                products=[species[i] for i in products],
+                reversible=reversible,
+                duplicate=duplicate,
+                kinetics=Chebyshev() if chebyshev else Arrhenius(),
+            )
+
+        def random_recipe():
+            return (
+                [generator.randrange(len(species)) for _ in range(generator.choice([1, 2]))],
+                [generator.randrange(len(species)) for _ in range(generator.choice([1, 2]))],
+                generator.random() < 0.7,
+                generator.random() < 0.2,
+                generator.random() < 0.2,
+            )
+
+        matches = 0
+        for trial in range(100):
+            checked_recipes = [random_recipe() for _ in range(generator.randrange(0, 12))]
+            new_recipes = [random_recipe() for _ in range(generator.randrange(0, 12))]
+            expected_checked = [random_reaction(recipe) for recipe in checked_recipes]
+            expected_new = [random_reaction(recipe) for recipe in new_recipes]
+            for reaction in expected_new:
+                mark_duplicate_reaction(reaction, expected_checked)
+                expected_checked.append(reaction)
+            checked = [random_reaction(recipe) for recipe in checked_recipes]
+            new = [random_reaction(recipe) for recipe in new_recipes]
+            mark_new_duplicate_reactions(new, checked)
+            assert [rxn.duplicate for rxn in checked] == [rxn.duplicate for rxn in expected_checked]
+            assert len(checked) == len(checked_recipes) + len(new_recipes)
+            assert checked[len(checked_recipes):] == new
+            matches += sum(rxn.duplicate for rxn in checked)
+        # The random reactions do include duplicates
+        assert matches > 100
+
+    def test_mark_new_duplicate_reactions_for_molecules(self):
+        """
+        Test that reactions of molecules (whose lists are compared differently than lists of species) are
+        marked in the same way as by mark_duplicate_reaction().
+        """
+        molecules = [Molecule(smiles="CC"), Molecule(smiles="[CH3]")]
+        checked = [Reaction(reactants=[molecules[0]], products=[molecules[1], molecules[1]], kinetics=Arrhenius())]
+        new = [Reaction(reactants=[molecules[0]], products=[molecules[1], molecules[1]], kinetics=Arrhenius())]
+        mark_new_duplicate_reactions(new, checked)
+        assert checked[0].duplicate and new[0].duplicate
+        assert checked[1] is new[0]
 
     def test_mark_duplicate_reactions(self):
         """Test that we can properly mark duplicate reactions for Chemkin."""

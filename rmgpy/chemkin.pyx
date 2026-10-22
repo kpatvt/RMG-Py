@@ -36,6 +36,7 @@ import re
 import shutil
 import textwrap
 import warnings
+from operator import itemgetter
 
 import numpy as np
 
@@ -2073,6 +2074,73 @@ def mark_duplicate_reaction(test_reaction, reaction_list):
                                     'to Chemkin file.'.format(reaction1, reaction2))
                     reaction1.duplicate = True
                     reaction2.duplicate = True
+
+
+def mark_new_duplicate_reactions(new_reactions, checked_reactions):
+    """
+    Check each of the `new_reactions`, in order, for being a duplicate (in Chemkin terms) of one of the
+    `checked_reactions` (or of an earlier one of the `new_reactions`), and append it to `checked_reactions`.
+    This is equivalent to::
+
+        for reaction in new_reactions:
+            mark_duplicate_reaction(reaction, checked_reactions)
+            checked_reactions.append(reaction)
+
+    but it is much faster for long lists: :func:`mark_duplicate_reaction` compares a reaction with every reaction
+    of the list, while a reaction can only be a duplicate of a reaction with the same reactants and products (in
+    either direction), so only those are looked up, in the order of the list, and passed to it.
+    """
+    # The reactants and products are compared as lists of species, i.e. by identity
+    new_reactions = list(new_reactions)
+    index = {}
+    position = 0
+    for reaction in checked_reactions:
+        signature = _reaction_signature(reaction)
+        if signature is None:
+            # Not all reactants and products are species: compare with all reactions
+            _mark_new_duplicate_reactions_slowly(new_reactions, checked_reactions)
+            return
+        index.setdefault(signature, []).append((position, reaction))
+        position += 1
+    for i, reaction in enumerate(new_reactions):
+        signature = _reaction_signature(reaction)
+        if signature is None:
+            _mark_new_duplicate_reactions_slowly(new_reactions[i:], checked_reactions)
+            return
+        candidates = index.get(signature, [])
+        reverse_signature = (signature[1], signature[0])
+        if reverse_signature != signature:
+            reverse_candidates = index.get(reverse_signature)
+            if reverse_candidates:
+                candidates = sorted(candidates + reverse_candidates, key=itemgetter(0))
+        mark_duplicate_reaction(reaction, [candidate[1] for candidate in candidates])
+        index.setdefault(signature, []).append((position, reaction))
+        position += 1
+        checked_reactions.append(reaction)
+
+
+def _mark_new_duplicate_reactions_slowly(new_reactions, checked_reactions):
+    """
+    The loop that :func:`mark_new_duplicate_reactions` is equivalent to.
+    """
+    for reaction in new_reactions:
+        mark_duplicate_reaction(reaction, checked_reactions)
+        checked_reactions.append(reaction)
+
+
+def _reaction_signature(reaction):
+    """
+    Return the identities of the reactants and products of `reaction`, or ``None`` if they are not all species.
+    """
+    reactants = reaction.reactants
+    products = reaction.products
+    for species in reactants:
+        if not isinstance(species, Species):
+            return None
+    for species in products:
+        if not isinstance(species, Species):
+            return None
+    return (tuple([id(species) for species in reactants]), tuple([id(species) for species in products]))
 
 
 def mark_duplicate_reactions(reactions):
