@@ -730,6 +730,9 @@ class UnitType(object):
         self.units = units
         self.dimensionality = pq.Quantity(1.0, units).simplified.dimensionality
         self.common_units = common_units or []
+        # The units that have been checked to be consistent with this unit type, with the factor that converts
+        # their values to this unit type's units (``None`` for units with the dimensionality of this unit type)
+        self._checked_units = {}
         self.extra_dimensionality = {}
         if extra_dimensionality:
             for unit, factor in extra_dimensionality.items():
@@ -748,17 +751,22 @@ class UnitType(object):
         if units == self.units or units in self.common_units:
             return quantity
 
-        # Check that the units are consistent with this unit type
-        # This uses the quantities package (slow!)
-        units = pq.Quantity(1.0, units)
-        dimensionality = units.simplified.dimensionality
-        if dimensionality == self.dimensionality:
-            pass
-        elif dimensionality in self.extra_dimensionality:
-            quantity.value_si *= self.extra_dimensionality[dimensionality]
+        # Check that the units are consistent with this unit type. This uses the quantities package (slow!),
+        # so the result is stored for each units string (units that are not consistent raise an error every time)
+        try:
+            factor = self._checked_units[units]
+        except KeyError:
+            dimensionality = pq.Quantity(1.0, units).simplified.dimensionality
+            if dimensionality == self.dimensionality:
+                factor = None
+            elif dimensionality in self.extra_dimensionality:
+                factor = self.extra_dimensionality[dimensionality]
+            else:
+                raise QuantityError('Invalid units {0!r}. Try common units: {1}'.format(units, self.common_units))
+            self._checked_units[units] = factor
+        if factor is not None:
+            quantity.value_si *= factor
             quantity.units = self.units
-        else:
-            raise QuantityError('Invalid units {0!r}. Try common units: {1}'.format(quantity.units, self.common_units))
 
         # Return the Quantity or ArrayQuantity object object
         return quantity

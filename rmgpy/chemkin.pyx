@@ -36,6 +36,7 @@ import re
 import shutil
 import textwrap
 import warnings
+from operator import itemgetter
 
 import numpy as np
 
@@ -1592,6 +1593,23 @@ def _get_species_identifier(species):
 ################################################################################
 
 
+# The wrapped lines of the comment lines that are longer than the Chemkin line limit. The same long comments are
+# written again in every iteration, and wrapping text with textwrap is slow. The lists must not be modified.
+_wrapped_comment_lines = {}
+
+
+def _wrap_comment_line(line):
+    """
+    Return the list of lines that the comment `line` is wrapped into, i.e. ``textwrap.fill(line, 150).split("\n")``.
+    """
+    wrapped = _wrapped_comment_lines.get(line)
+    if wrapped is None:
+        if len(_wrapped_comment_lines) >= 20000:
+            _wrapped_comment_lines.clear()
+        wrapped = _wrapped_comment_lines[line] = textwrap.fill(line, 150).split("\n")
+    return wrapped
+
+
 def write_thermo_entry(species, element_counts=None, bint verbose=True):
     """
     Return a string representation of the NASA model readable by Chemkin.
@@ -1662,7 +1680,7 @@ def write_thermo_entry(species, element_counts=None, bint verbose=True):
         if thermo.comment:
             for line in thermo.comment.strip().split("\n"):
                 if len(line) > 150:
-                    short_lines = textwrap.fill(line, 150).split("\n")
+                    short_lines = _wrap_comment_line(line)
                     for short_line in short_lines:
                         string += "! {0}\n".format(short_line)
                 else:
@@ -1873,7 +1891,7 @@ def write_kinetics_entry(reaction, species_list, verbose=True, java_library=Fals
         if reaction.kinetics.comment:
             for line in reaction.kinetics.comment.split("\n"):
                 if len(line) > 150:
-                    short_lines = textwrap.fill(line, 150).split("\n")
+                    short_lines = _wrap_comment_line(line)
                     for short_line in short_lines:
                         string += "! {0}\n".format(short_line)
                 else:
@@ -2075,6 +2093,73 @@ def mark_duplicate_reaction(test_reaction, reaction_list):
                     reaction2.duplicate = True
 
 
+def mark_new_duplicate_reactions(new_reactions, checked_reactions):
+    """
+    Check each of the `new_reactions`, in order, for being a duplicate (in Chemkin terms) of one of the
+    `checked_reactions` (or of an earlier one of the `new_reactions`), and append it to `checked_reactions`.
+    This is equivalent to::
+
+        for reaction in new_reactions:
+            mark_duplicate_reaction(reaction, checked_reactions)
+            checked_reactions.append(reaction)
+
+    but it is much faster for long lists: :func:`mark_duplicate_reaction` compares a reaction with every reaction
+    of the list, while a reaction can only be a duplicate of a reaction with the same reactants and products (in
+    either direction), so only those are looked up, in the order of the list, and passed to it.
+    """
+    # The reactants and products are compared as lists of species, i.e. by identity
+    new_reactions = list(new_reactions)
+    index = {}
+    position = 0
+    for reaction in checked_reactions:
+        signature = _reaction_signature(reaction)
+        if signature is None:
+            # Not all reactants and products are species: compare with all reactions
+            _mark_new_duplicate_reactions_slowly(new_reactions, checked_reactions)
+            return
+        index.setdefault(signature, []).append((position, reaction))
+        position += 1
+    for i, reaction in enumerate(new_reactions):
+        signature = _reaction_signature(reaction)
+        if signature is None:
+            _mark_new_duplicate_reactions_slowly(new_reactions[i:], checked_reactions)
+            return
+        candidates = index.get(signature, [])
+        reverse_signature = (signature[1], signature[0])
+        if reverse_signature != signature:
+            reverse_candidates = index.get(reverse_signature)
+            if reverse_candidates:
+                candidates = sorted(candidates + reverse_candidates, key=itemgetter(0))
+        mark_duplicate_reaction(reaction, [candidate[1] for candidate in candidates])
+        index.setdefault(signature, []).append((position, reaction))
+        position += 1
+        checked_reactions.append(reaction)
+
+
+def _mark_new_duplicate_reactions_slowly(new_reactions, checked_reactions):
+    """
+    The loop that :func:`mark_new_duplicate_reactions` is equivalent to.
+    """
+    for reaction in new_reactions:
+        mark_duplicate_reaction(reaction, checked_reactions)
+        checked_reactions.append(reaction)
+
+
+def _reaction_signature(reaction):
+    """
+    Return the identities of the reactants and products of `reaction`, or ``None`` if they are not all species.
+    """
+    reactants = reaction.reactants
+    products = reaction.products
+    for species in reactants:
+        if not isinstance(species, Species):
+            return None
+    for species in products:
+        if not isinstance(species, Species):
+            return None
+    return (tuple([id(species) for species in reactants]), tuple([id(species) for species in products]))
+
+
 def mark_duplicate_reactions(reactions):
     """
     For a given list of `reactions`, mark all of the duplicate reactions as
@@ -2174,8 +2259,16 @@ def save_transport_file(path, species):
                 ))
 
 
+def _without_comment_lines(string):
+    """
+    Return `string` without its lines that start with ``!``, i.e. the Chemkin comments. The annotated version
+    of a thermo or kinetics entry only has these lines in addition to the plain version.
+    """
+    return '\n'.join([line for line in string.split('\n') if not line.startswith('!')])
+
+
 def save_chemkin_file(path, species, reactions, verbose=True, check_for_duplicates=True,
-                      elements_in_use=None):
+                      elements_in_use=None, plain_path=None):
     """
     Save a Chemkin input file to `path` on disk containing the provided lists
     of `species` and `reactions`.
@@ -2185,7 +2278,14 @@ def save_chemkin_file(path, species, reactions, verbose=True, check_for_duplicat
     ``elements_in_use`` is a set of :class:`Element` singletons used to write the
     ELEMENTS section. If ``None``, it is computed from ``species`` via
     :meth:`rmgpy.rmg.model.ReactionModel.get_elements`.
+
+    If ``plain_path`` is given (which requires ``verbose=True``), the same file without the comments is also
+    saved to it. This gives the same files as calling this function twice, but formats every entry only once,
+    since the plain version of an entry is its annotated version without the comment lines.
     """
+    if plain_path is not None and not verbose:
+        raise ValueError('The plain version of a Chemkin file is made from the annotated version')
+
     # Check for duplicate
     if check_for_duplicates:
         mark_duplicate_reactions(reactions)
@@ -2195,29 +2295,47 @@ def save_chemkin_file(path, species, reactions, verbose=True, check_for_duplicat
         elements_in_use = ReactionModel(species=species).get_elements()
 
     f = open(path, 'w')
+    g = open(plain_path, 'w') if plain_path is not None else None
 
     sorted_species = sorted(species, key=lambda species: species.index)
 
     # Elements section
     write_elements_section(f, elements_in_use)
+    if g is not None:
+        write_elements_section(g, elements_in_use)
 
     # Species section
     f.write('SPECIES\n')
+    if g is not None:
+        g.write('SPECIES\n')
     for spec in sorted_species:
         label = get_species_identifier(spec)
         if verbose:
             f.write('    {0!s:<16}    ! {1}\n'.format(label, str(spec)))
         else:
             f.write('    {0!s:<16}\n'.format(label))
+        if g is not None:
+            g.write('    {0!s:<16}\n'.format(label))
     f.write('END\n\n\n\n')
+    if g is not None:
+        g.write('END\n\n\n\n')
 
     # Thermodynamics section
     f.write('THERM ALL\n')
     f.write('   300.000  1000.000  5000.000\n\n')
+    if g is not None:
+        g.write('THERM ALL\n')
+        g.write('   300.000  1000.000  5000.000\n\n')
     for spec in sorted_species:
-        f.write(write_thermo_entry(spec, verbose=verbose))
+        entry = write_thermo_entry(spec, verbose=verbose)
+        f.write(entry)
         f.write('\n')
+        if g is not None:
+            g.write(_without_comment_lines(entry))
+            g.write('\n')
     f.write('END\n\n\n\n')
+    if g is not None:
+        g.write('END\n\n\n\n')
 
     ## Transport section would go here
     #f.write('TRANSPORT\n')
@@ -2228,14 +2346,25 @@ def save_chemkin_file(path, species, reactions, verbose=True, check_for_duplicat
 
     # Reactions section
     f.write('REACTIONS    KCAL/MOLE   MOLES\n\n')
+    if g is not None:
+        g.write('REACTIONS    KCAL/MOLE   MOLES\n\n')
     global _chemkin_reaction_count
     _chemkin_reaction_count = 0
     for rxn in reactions:
-        f.write(write_kinetics_entry(rxn, species_list=species, verbose=verbose))
+        entry = write_kinetics_entry(rxn, species_list=species, verbose=verbose)
+        f.write(entry)
         # Don't forget to mark duplicates!
         f.write('\n')
+        if g is not None:
+            g.write(_without_comment_lines(entry))
+            g.write('\n')
     f.write('END\n\n')
     f.close()
+    if g is not None:
+        g.write('END\n\n')
+        g.close()
+        logging.info("Chemkin file contains {0} reactions.".format(_chemkin_reaction_count))
+        logging.info('Saving annotated version of Chemkin file...')
     logging.info("Chemkin file contains {0} reactions.".format(_chemkin_reaction_count))
     _chemkin_reaction_count = None
 
@@ -2368,12 +2497,9 @@ def _save_chemkin(reaction_model, path, verbose_path, dictionary_path, transport
                                   check_for_duplicates=False, surface_site_density=reaction_model.surface_site_density)
 
     else:
-        # Gas phase only
-        save_chemkin_file(path, species_list, rxn_list, verbose=False,
-                          check_for_duplicates=False, elements_in_use=elements_in_use)
-        logging.info('Saving annotated version of Chemkin file...')
+        # Gas phase only: the annotated file is formatted once, and the plain file is made from it
         save_chemkin_file(verbose_path, species_list, rxn_list, verbose=True,
-                          check_for_duplicates=False, elements_in_use=elements_in_use)
+                          check_for_duplicates=False, elements_in_use=elements_in_use, plain_path=path)
     if dictionary_path:
         save_species_dictionary(dictionary_path, species_list)
     if transport_path:

@@ -1230,3 +1230,47 @@ class TestExactCopies:
         copy = q.copy()
         copy.value_si[0] = 0.0
         assert q.value_si[0] != 0.0
+
+
+class TestUnitTypeUnitChecks:
+    """
+    Contains unit tests of the checks of the units of a :class:`quantity.UnitType`, whose results are stored for
+    each units string.
+    """
+
+    def test_units_with_the_same_dimensionality(self):
+        """
+        Units that are not common units but have the right dimensionality are kept, every time.
+        """
+        for i in range(3):
+            q = quantity.Length((2.0, "angstrom"))
+            assert q.units == "angstrom"
+            assert q.value_si == pytest.approx(2.0e-10, rel=1e-12)
+            v = quantity.Volume(([1.0, 2.0], "angstrom^3"))
+            assert v.units == "angstrom^3"
+            assert v.value_si[1] == pytest.approx(2.0e-30, rel=1e-12)
+            d = quantity.DipoleMoment((1.0, "De"))
+            assert d.units == "De"
+            assert d.value_si == pytest.approx(1.0 / (1.0e21 * constants.c), rel=1e-4)
+
+    def test_units_with_extra_dimensionality(self):
+        """
+        Units that need a conversion are converted every time, not only the first time.
+        """
+        for i in range(3):
+            e = quantity.Energy((100.0, "K"))
+            assert e.units == "J/mol"
+            assert e.value_si == pytest.approx(100.0 * constants.R, rel=1e-12)
+            f = quantity.Frequency(([1.0, 2.0], "Hz"))
+            assert f.units == "cm^-1"
+            assert f.value_si[1] == pytest.approx(2.0 / (constants.c * 100.0), rel=1e-12)
+
+    def test_invalid_units(self):
+        """
+        Units with the wrong dimensionality raise an error every time.
+        """
+        for i in range(3):
+            with pytest.raises(quantity.QuantityError):
+                quantity.Length((1.0, "kg"))
+            with pytest.raises(quantity.QuantityError):
+                quantity.Energy((1.0, "m"))

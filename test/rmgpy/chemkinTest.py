@@ -37,7 +37,9 @@ from rmgpy.chemkin import (
     get_species_identifier,
     load_chemkin_file,
     load_transport_file,
+    mark_duplicate_reaction,
     mark_duplicate_reactions,
+    mark_new_duplicate_reactions,
     read_kinetics_entry,
     read_reaction_comments,
     read_thermo_block,
@@ -56,6 +58,7 @@ from rmgpy.exceptions import ChemkinError
 from rmgpy.kinetics.arrhenius import Arrhenius, MultiArrhenius
 from rmgpy.kinetics.chebyshev import Chebyshev
 from rmgpy.reaction import Reaction
+from rmgpy.molecule import Molecule
 from rmgpy.species import Species
 from rmgpy.thermo import NASA, NASAPolynomial
 from rmgpy.transport import TransportData
@@ -481,6 +484,123 @@ class ChemkinTest:
         assert rtest.library == rtrue.library
         assert isinstance(rtest.kinetics, MultiArrhenius)
         assert all(isinstance(k, Arrhenius) for k in rtest.kinetics.arrhenius)
+
+    @pytest.mark.parametrize("model", ["minimal", "NC", "pdd"])
+    def test_save_chemkin_file_with_plain_version(self, tmp_path, model):
+        """
+        Test that save_chemkin_file() with a plain_path gives the same two files as saving the annotated and
+        the plain file with separate calls.
+        """
+        folder = os.path.join(os.path.dirname(__file__), "test_data", "chemkin", "chemkin_py", model)
+        species, reactions = load_chemkin_file(os.path.join(folder, "chem.inp"),
+                                               os.path.join(folder, "species_dictionary.txt"))
+        separate_annotated = str(tmp_path / "separate_annotated.inp")
+        separate_plain = str(tmp_path / "separate_plain.inp")
+        save_chemkin_file(separate_plain, species, reactions, verbose=False, check_for_duplicates=False)
+        save_chemkin_file(separate_annotated, species, reactions, verbose=True, check_for_duplicates=False)
+        together_annotated = str(tmp_path / "together_annotated.inp")
+        together_plain = str(tmp_path / "together_plain.inp")
+        save_chemkin_file(together_annotated, species, reactions, verbose=True, check_for_duplicates=False,
+                          plain_path=together_plain)
+
+        with open(separate_annotated) as f, open(together_annotated) as g:
+            annotated = f.read()
+            assert annotated == g.read()
+        with open(separate_plain) as f, open(together_plain) as g:
+            plain = f.read()
+            assert plain == g.read()
+        # The annotated file does have comments that the plain file does not
+        assert annotated != plain
+        assert not any(line.startswith("!") for line in plain.split("\n"))
+
+        # The plain version can only be made from the annotated version
+        with pytest.raises(ValueError):
+            save_chemkin_file(str(tmp_path / "x.inp"), species, reactions, verbose=False,
+                              check_for_duplicates=False, plain_path=str(tmp_path / "y.inp"))
+
+    def test_long_comments_are_wrapped(self):
+        """
+        Test that comment lines longer than 150 characters are wrapped like textwrap does, also when the same
+        comment is written again (the wrapped lines are stored).
+        """
+        import textwrap
+
+        comment = " ".join("word{0}".format(i) for i in range(80)) + "\nshort second line"
+        species = [Species().from_smiles("CC"), Species().from_smiles("[CH3]")]
+        reaction = Reaction(
+            reactants=[species[0]],
+            products=[species[1], species[1]],
+            kinetics=Arrhenius(A=(1e10, "s^-1"), n=0, Ea=(10, "kJ/mol"), T0=(1, "K"), comment=comment),
+        )
+        long_line = comment.split("\n")[0]
+        expected = ["! {0}".format(line) for line in textwrap.fill(long_line, 150).split("\n")]
+        expected.append("! short second line")
+        assert len(expected) > 2
+        entries = [write_kinetics_entry(reaction, species_list=species, verbose=True) for _ in range(3)]
+        assert entries[0] == entries[1] == entries[2]
+        lines = entries[0].split("\n")
+        start = lines.index(expected[0])
+        assert lines[start:start + len(expected)] == expected
+
+    def test_mark_new_duplicate_reactions(self):
+        """
+        Test that mark_new_duplicate_reactions() gives the same flags as marking each new reaction with
+        mark_duplicate_reaction() and appending it to the checked reactions, for random lists of reactions.
+        """
+        import random
+
+        species = [Species().from_smiles(smiles) for smiles in ("CC", "[CH3]", "[OH]", "C[CH2]", "O")]
+        generator = random.Random(0)
+
+        def random_reaction(recipe):
+            reactants, products, reversible, duplicate, chebyshev = recipe
+            return Reaction(
+                reactants=[species[i] for i in reactants],
+                products=[species[i] for i in products],
+                reversible=reversible,
+                duplicate=duplicate,
+                kinetics=Chebyshev() if chebyshev else Arrhenius(),
+            )
+
+        def random_recipe():
+            return (
+                [generator.randrange(len(species)) for _ in range(generator.choice([1, 2]))],
+                [generator.randrange(len(species)) for _ in range(generator.choice([1, 2]))],
+                generator.random() < 0.7,
+                generator.random() < 0.2,
+                generator.random() < 0.2,
+            )
+
+        matches = 0
+        for trial in range(100):
+            checked_recipes = [random_recipe() for _ in range(generator.randrange(0, 12))]
+            new_recipes = [random_recipe() for _ in range(generator.randrange(0, 12))]
+            expected_checked = [random_reaction(recipe) for recipe in checked_recipes]
+            expected_new = [random_reaction(recipe) for recipe in new_recipes]
+            for reaction in expected_new:
+                mark_duplicate_reaction(reaction, expected_checked)
+                expected_checked.append(reaction)
+            checked = [random_reaction(recipe) for recipe in checked_recipes]
+            new = [random_reaction(recipe) for recipe in new_recipes]
+            mark_new_duplicate_reactions(new, checked)
+            assert [rxn.duplicate for rxn in checked] == [rxn.duplicate for rxn in expected_checked]
+            assert len(checked) == len(checked_recipes) + len(new_recipes)
+            assert checked[len(checked_recipes):] == new
+            matches += sum(rxn.duplicate for rxn in checked)
+        # The random reactions do include duplicates
+        assert matches > 100
+
+    def test_mark_new_duplicate_reactions_for_molecules(self):
+        """
+        Test that reactions of molecules (whose lists are compared differently than lists of species) are
+        marked in the same way as by mark_duplicate_reaction().
+        """
+        molecules = [Molecule(smiles="CC"), Molecule(smiles="[CH3]")]
+        checked = [Reaction(reactants=[molecules[0]], products=[molecules[1], molecules[1]], kinetics=Arrhenius())]
+        new = [Reaction(reactants=[molecules[0]], products=[molecules[1], molecules[1]], kinetics=Arrhenius())]
+        mark_new_duplicate_reactions(new, checked)
+        assert checked[0].duplicate and new[0].duplicate
+        assert checked[1] is new[0]
 
     def test_mark_duplicate_reactions(self):
         """Test that we can properly mark duplicate reactions for Chemkin."""
